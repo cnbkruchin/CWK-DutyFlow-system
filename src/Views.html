@@ -1,0 +1,1147 @@
+<script>
+/* =================================================================
+ * Views.html — หน้าจอทั้งหมด (8 หน้า)
+ * ================================================================= */
+
+var VIEWS = {};
+
+/* ---------- ตัวช่วยร่วม ---------- */
+
+function pageHead(title, sub, actionsHtml) {
+  return '<div class="page-head"><div><h1 class="page-title">' + esc(title) + '</h1>' +
+    (sub ? '<div class="page-sub">' + sub + '</div>' : '') + '</div>' +
+    (actionsHtml ? '<div class="page-actions">' + actionsHtml + '</div>' : '') + '</div>';
+}
+
+function statCard(label, value, unit, kind) {
+  return '<div class="stat ' + (kind || '') + '"><div class="stat-label">' + esc(label) + '</div>' +
+    '<div class="stat-value">' + nf(value) +
+    (unit ? '<span class="stat-unit">' + esc(unit) + '</span>' : '') + '</div></div>';
+}
+
+function emptyState(icon, title, text, actionsHtml) {
+  return '<div class="empty"><div class="empty-icon">' + icon + '</div>' +
+    '<div class="empty-title">' + esc(title) + '</div><div>' + text + '</div>' +
+    (actionsHtml ? '<div class="empty-actions">' + actionsHtml + '</div>' : '') + '</div>';
+}
+
+function bar(pctVal) {
+  var p = Math.max(0, Math.min(100, Number(pctVal) || 0));
+  var cls = p >= 90 ? '' : (p >= 70 ? 'warn' : 'danger');
+  return '<div class="flex"><div class="bar ' + cls + '" style="flex:1"><span style="width:' + p + '%"></span></div>' +
+    '<span class="small nowrap">' + p + '%</span></div>';
+}
+
+function dateInput(id, value) {
+  return '<input type="date" class="input" id="' + id + '" value="' + esc(value) + '">';
+}
+
+/* =================================================================
+ * 1) วันนี้
+ * ================================================================= */
+
+VIEWS.today = function (root, state) {
+  var date = state.date || todayStr();
+  return call('today.summary', { date: date }).then(function (d) {
+    App.state.today = { date: d.date };
+
+    var head = pageHead(d.dateThai,
+      (d.semesterName ? esc(d.semesterName) : '<span class="tag tag-warn">ยังไม่ได้เปิดใช้ภาคเรียน</span>') +
+      (d.rotation.mode !== 'OFF' ? ' · หมุนจุด: ' + esc(d.rotation.modeLabel) : ''),
+      '<button class="btn btn-sm" id="dPrev" type="button">‹ วันก่อน</button>' +
+      dateInput('dPick', d.date) +
+      '<button class="btn btn-sm" id="dNext" type="button">วันถัดไป ›</button>' +
+      '<button class="btn btn-sm" id="dToday" type="button">วันนี้</button>');
+
+    var html = head;
+
+    (d.alerts || []).forEach(function (a) {
+      html += '<div class="alert alert-' + a.type + '"><div class="grow">' + esc(a.text) + '</div>' +
+        (a.link ? '<button class="link" type="button" data-nav="' + a.link + '">ไปที่หน้านั้น</button>' : '') +
+        '</div>';
+    });
+
+    if (!d.hasSchedule) {
+      html += setupOrEmptyHtml(d);
+      root.innerHTML = html;
+      bindTodayHead(d);
+      bindSetupButtons(root);
+      return;
+    }
+
+    var s = d.summary;
+    html += '<div class="stat-grid">' +
+      statCard('เวรทั้งหมด', s.total, 'ช่อง', 'primary') +
+      statCard('อยู่ครบ', s.present, 'ช่อง', 'ok') +
+      statCard('สาย / อยู่ไม่ครบ', s.late + s.partial, 'ช่อง', 'warn') +
+      statCard('ไม่อยู่', s.absent, 'ช่อง', 'danger') +
+      '</div>';
+
+    html += '<div class="card"><div class="card-head">' +
+      '<div><div class="card-title">เวรประจำวันทุกจุด</div>' +
+      '<div class="card-sub">ใครอยู่จุดไหน อยู่จริงหรือไม่ มีหลักฐานอะไร และถ้าเปลี่ยนเวรใครอนุมัติ</div></div>' +
+      '<div class="card-actions small muted">' +
+      '<span class="tag tag-ok"><span class="dot dot-ok"></span>หลักฐานครบ</span> ' +
+      '<span class="tag tag-warn"><span class="dot dot-warn"></span>ไม่ครบ</span> ' +
+      '<span class="tag tag-danger"><span class="dot dot-danger"></span>ไม่มี</span>' +
+      '</div></div><div class="card-body"><div class="duty-grid">';
+
+    d.rows.forEach(function (r) { html += dutyCardHtml(r, d.canAdjust); });
+    html += '</div></div></div>';
+
+    root.innerHTML = html;
+    bindTodayHead(d);
+    bindDutyCards(root, d);
+    root.querySelectorAll('[data-nav]').forEach(function (b) {
+      b.onclick = function () { go(b.getAttribute('data-nav')); };
+    });
+  });
+};
+
+function setupOrEmptyHtml(d) {
+  var setup = App.boot && App.boot.setup;
+  if (setup && !setup.ready && setup.canSetup) {
+    var steps = setup.steps.map(function (st, i) {
+      return '<div class="step' + (st.done ? ' done' : '') + '">' +
+        '<div class="step-num">' + (st.done ? '✓' : (i + 1)) + '</div>' +
+        '<div class="step-label">' + esc(st.label) + '</div>' +
+        '<div class="step-count">' + (st.done ? nf(st.count) + ' รายการ' : 'ยังไม่ได้ทำ') + '</div>' +
+        (st.done ? '' : '<button class="btn btn-sm btn-primary" data-nav="' + st.nav + '">ไปทำ</button>') +
+        '</div>';
+    }).join('');
+    return '<div class="card"><div class="card-head">' +
+      '<div><div class="card-title">ยังตั้งค่าระบบไม่ครบ (' + setup.doneCount + '/' + setup.totalSteps + ')</div>' +
+      '<div class="card-sub">ทำตามขั้นตอนด้านล่างให้ครบ แล้วหน้านี้จะแสดงตารางเวรทันที</div></div></div>' +
+      '<div class="card-body"><div class="steps">' + steps + '</div>' +
+      '<div class="mt16 flex"><button class="btn" type="button" id="seedSample">ใส่ข้อมูลตัวอย่างให้ทดลองใช้</button>' +
+      '<button class="btn btn-ghost" type="button" data-nav="system">ตรวจสอบระบบ</button></div>' +
+      '</div></div>';
+  }
+  if (!d.isDutyDay) {
+    return '<div class="card"><div class="card-body">' +
+      emptyState('🌤️', 'วันนี้ไม่มีเวร', 'วันที่เลือกเป็นวันหยุดหรือวันปิดเรียนตามปฏิทินของภาคเรียน') +
+      '</div></div>';
+  }
+  return '<div class="card"><div class="card-body">' +
+    emptyState('📭', 'ยังไม่มีตารางเวรของวันนี้',
+      'ผู้ดูแลระบบต้องจัดเวรประจำภาคเรียน แล้วสั่ง "สร้างตารางรายวัน" ก่อน',
+      (App.boot.user.level >= 3 ? '<button class="btn btn-primary" data-nav="assign">ไปหน้าจัดเวร</button>' : '')) +
+    '</div></div>';
+}
+
+function dutyCardHtml(r, canAdjust) {
+  var cls = attendClass(r.attend);
+  var name = r.effectiveTeacherName || '<span class="muted">(ยังไม่ได้กำหนดครู)</span>';
+  var h = '<div class="duty ' + cls + '" data-id="' + esc(r.id) + '">' +
+    '<div class="duty-top"><div class="duty-point">' + esc(r.pointName || '(ไม่พบชื่อจุด)') + '</div>' +
+    (r.seatNo > 1 ? '<span class="tag tag-muted">ที่ ' + r.seatNo + '</span>' : '') +
+    '<span style="margin-left:auto">' + attendTag(r.attend, r.attendLabel) + '</span></div>' +
+    '<div class="duty-slot">' + esc(r.slotName || '') + ' · ' + esc(r.startTime) + '–' + esc(r.endTime) + '</div>' +
+    '<div class="duty-teacher">' + name + '</div>';
+
+  if (r.changed && r.originalTeacherName) {
+    h += '<div class="duty-orig">เดิม: ' + esc(r.originalTeacherName) + '</div>';
+  }
+
+  var meta = [];
+  if (r.checkInAt) meta.push('⏱ เข้า ' + esc(r.checkInAt) + (r.checkOutAt ? ' · ออก ' + esc(r.checkOutAt) : ''));
+  if (r.lateMinutes) meta.push('⚠ สาย ' + r.lateMinutes + ' นาที');
+  if (r.distanceM !== null && r.distanceM !== undefined) meta.push('📍 ' + nf(r.distanceM) + ' ม.');
+  if (r.photoCount) meta.push('📷 ' + r.photoCount + ' ภาพ');
+  if (r.incidentCount) meta.push('📝 ' + r.incidentCount + ' เหตุการณ์');
+  if (!meta.length) meta.push('ไม่มีหลักฐาน');
+  h += '<div class="duty-meta">' + meta.map(esc).join(' ') + '</div>';
+  h += '<div class="mt8">' + evidenceTag(r.evidence, r.evidenceLabel) + '</div>';
+
+  if (r.photos && r.photos.length) {
+    h += '<div class="thumbs">' + r.photos.slice(0, 4).map(function (p) {
+      return '<img src="' + esc(p.url) + '" alt="หลักฐาน" loading="lazy" data-photo="' + esc(p.url) + '">';
+    }).join('') + '</div>';
+  }
+
+  if (r.approval) {
+    h += '<div class="duty-approval">🔁 ' + esc(r.approval.typeLabel) +
+      '<br>จาก <b>' + esc(r.approval.fromName || '-') + '</b> เป็น <b>' + esc(r.approval.toName || '-') + '</b>' +
+      '<br>อนุมัติโดย <b>' + esc(r.approval.approverName || '-') + '</b>' +
+      ' (' + esc(r.approval.approvalLevelName || 'ไม่ระบุระดับ') + ')' +
+      (r.approval.reason ? '<br>เหตุผล: ' + esc(r.approval.reason) : '') + '</div>';
+  } else if (r.changed) {
+    h += '<div class="duty-approval" style="background:var(--danger-bg);color:#7f1d1d">' +
+      '⚠ มีการเปลี่ยนครู แต่ไม่พบบันทึกการอนุมัติ</div>';
+  }
+
+  if (canAdjust) {
+    h += '<div class="duty-actions">' +
+      '<button class="btn btn-sm" data-act="adjust" data-id="' + esc(r.id) + '">เปลี่ยนครูเวร</button>' +
+      '<button class="btn btn-sm" data-act="swap" data-id="' + esc(r.id) + '">สลับจุด</button>' +
+      '</div>';
+  }
+  return h + '</div>';
+}
+
+function bindTodayHead(d) {
+  var p = $('dPrev'), n = $('dNext'), t = $('dToday'), pick = $('dPick');
+  if (p) p.onclick = function () { go('today', { date: d.prevDate }); };
+  if (n) n.onclick = function () { go('today', { date: d.nextDate }); };
+  if (t) t.onclick = function () { go('today', { date: todayStr() }); };
+  if (pick) pick.onchange = function () { if (pick.value) go('today', { date: pick.value }); };
+}
+
+/* =================================================================
+ * 2) เวรของฉัน
+ * ================================================================= */
+
+VIEWS.mine = function (root, state) {
+  var from = state.from || todayStr();
+  var to = state.to || addDaysStr(from, 30);
+
+  return call('schedule.mine', { from: from, to: to }).then(function (d) {
+    var html = pageHead('เวรของฉัน', 'ตารางเวรและการบันทึกหลักฐานการปฏิบัติงาน',
+      dateInput('mFrom', d.from) + '<span class="muted">ถึง</span>' + dateInput('mTo', d.to) +
+      '<button class="btn btn-sm btn-primary" id="mGo" type="button">แสดง</button>');
+
+    html += '<div class="stat-grid">' +
+      statCard('เวรทั้งหมด', d.stats.total, 'ครั้ง', 'primary') +
+      statCard('บันทึกแล้ว', d.stats.done, 'ครั้ง', 'ok') +
+      statCard('รอปฏิบัติ', d.stats.upcoming, 'ครั้ง') +
+      statCard('ยังไม่ได้บันทึก', d.stats.missed, 'ครั้ง', 'danger') +
+      '</div>';
+
+    if (!d.rows.length) {
+      html += '<div class="card"><div class="card-body">' +
+        emptyState('🗓️', 'ไม่มีเวรในช่วงวันที่เลือก', 'ลองขยายช่วงวันที่ หรือสอบถามหัวหน้างานเวร') +
+        '</div></div>';
+      root.innerHTML = html;
+      bindMineHead();
+      return;
+    }
+
+    html += '<div class="card"><div class="card-body"><div class="duty-grid">';
+    d.rows.forEach(function (r) {
+      var cls = r.checkedIn ? 'ok' : (r.isPast ? 'danger' : '');
+      html += '<div class="duty ' + cls + '">' +
+        '<div class="duty-top"><div class="duty-point">' + esc(r.pointName) + '</div>' +
+        '<span style="margin-left:auto">' +
+        (r.checkedIn ? '<span class="tag tag-ok">บันทึกแล้ว</span>' :
+          (r.isPast ? '<span class="tag tag-danger">ไม่ได้บันทึก</span>' :
+            '<span class="tag tag-info">รอปฏิบัติ</span>')) + '</span></div>' +
+        '<div class="duty-slot">' + esc(r.dateThai) + ' · ' + esc(r.slotName) + ' ' +
+        esc(r.startTime) + '–' + esc(r.endTime) + '</div>' +
+        (r.substitute ? '<div class="small mt8"><span class="tag tag-warn">อยู่แทน</span></div>' : '') +
+        '<div class="duty-actions">' +
+        (r.isToday && !r.checkedIn ?
+          '<button class="btn btn-sm btn-primary" data-act="checkin" data-id="' + esc(r.id) + '">เช็คอิน</button>' : '') +
+        (r.isToday && r.checkedIn && !r.checkedOut ?
+          '<button class="btn btn-sm btn-ok" data-act="checkout" data-id="' + esc(r.id) + '">เช็คเอาต์</button>' : '') +
+        (r.checkedIn ?
+          '<button class="btn btn-sm" data-act="addphoto" data-id="' + esc(r.id) + '">เพิ่มภาพ</button>' : '') +
+        (!r.isPast ?
+          '<button class="btn btn-sm" data-act="askswap" data-id="' + esc(r.id) + '">ขอเปลี่ยนเวร</button>' : '') +
+        '<button class="btn btn-sm" data-act="incident" data-id="' + esc(r.id) + '">แจ้งเหตุการณ์</button>' +
+        '</div></div>';
+    });
+    html += '</div></div></div>';
+
+    root.innerHTML = html;
+    bindMineHead();
+    bindMineActions(root);
+  });
+};
+
+function bindMineHead() {
+  var g = $('mGo');
+  if (g) g.onclick = function () {
+    go('mine', { from: $('mFrom').value, to: $('mTo').value });
+  };
+}
+
+/* =================================================================
+ * 3) จัดเวร
+ * ================================================================= */
+
+VIEWS.assign = function (root, state) {
+  var isAdmin = App.boot && App.boot.user && App.boot.user.level >= 3;
+  var tabs = [
+    { k: 'board', l: 'กระดานจัดเวร' },
+    { k: 'pin', l: 'ปักหมุดจุดเฉพาะบุคคล' },
+    { k: 'rotation', l: 'การหมุนเวร' },
+    { k: 'workload', l: 'ภาระเวรรายบุคคล' }
+  ];
+  if (isAdmin) tabs.splice(3, 0, { k: 'generate', l: 'สร้างตารางรายวัน' });
+
+  var tab = state.tab || 'board';
+  if (!tabs.some(function (t) { return t.k === tab; })) tab = 'board';
+
+  root.innerHTML = pageHead('จัดเวร', 'แม่แบบเวรประจำภาคเรียน การหมุนเวร และการปักหมุด') +
+    '<div class="tabs">' + tabs.map(function (t) {
+      return '<button class="tab' + (tab === t.k ? ' active' : '') + '" data-tab="' + t.k + '">' + t.l + '</button>';
+    }).join('') + '</div><div id="assignBody"></div>';
+
+  root.querySelectorAll('[data-tab]').forEach(function (b) {
+    b.onclick = function () { go('assign', { tab: b.getAttribute('data-tab') }); };
+  });
+
+  var body = $('assignBody');
+  body.innerHTML = '<div class="empty"><div class="boot-spinner"></div></div>';
+
+  if (tab === 'board') return renderAssignBoard(body);
+  if (tab === 'pin') return renderPinList(body);
+  if (tab === 'rotation') return renderRotation(body);
+  if (tab === 'generate') return renderGenerate(body);
+  return renderWorkload(body);
+};
+
+function renderAssignBoard(body) {
+  return Promise.all([
+    call('assign.board', {}),
+    cachedCall('teacher.options', {})
+  ]).then(function (res) {
+    var d = res[0], teachers = res[1];
+    App.state._teachers = teachers;
+
+    if (!d.semester) {
+      body.innerHTML = '<div class="card"><div class="card-body">' +
+        emptyState('📚', 'ยังไม่ได้เปิดใช้ภาคเรียน',
+          'ไปที่ ข้อมูลหลัก > ภาคเรียน เพื่อสร้างและเปิดใช้ภาคเรียนก่อน',
+          '<button class="btn btn-primary" data-nav="master">ไปหน้าข้อมูลหลัก</button>') +
+        '</div></div>';
+      bindNavButtons(body);
+      return;
+    }
+
+    var html = '<div class="card"><div class="card-head">' +
+      '<div><div class="card-title">' + esc(d.semester.name) + '</div>' +
+      '<div class="card-sub">' + esc(d.semester.startDateThai) + ' ถึง ' + esc(d.semester.endDateThai) +
+      ' · ' + nf(d.rows.length) + ' ที่นั่ง</div></div>' +
+      (d.canEdit ? '<div class="card-actions">' +
+        '<button class="btn btn-primary btn-sm" id="addAssign" type="button">+ เพิ่มที่นั่ง</button></div>' : '') +
+      '</div><div class="card-body">';
+
+    if (!d.rows.length) {
+      html += emptyState('🪑', 'ยังไม่มีการจัดเวร',
+        'กด "เพิ่มที่นั่ง" เพื่อกำหนดว่าวันไหน ช่วงเวลาใด จุดใด ใครอยู่เวร');
+    } else {
+      html += '<div class="table-wrap"><table class="tb"><thead><tr>' +
+        '<th>วัน</th><th>ช่วงเวลา</th><th>จุดเวร</th><th class="num">ที่</th><th>ครู</th>' +
+        '<th>กลุ่มสาระ</th><th>กลุ่มหมุน</th><th class="num">ลำดับ</th><th>ปักหมุด</th>' +
+        (d.canEdit ? '<th></th>' : '') + '</tr></thead><tbody>';
+      var slotName = {};
+      d.slots.forEach(function (s) { slotName[s.id] = s.name; });
+      d.rows.forEach(function (r) {
+        html += '<tr><td>' + esc(r.weekdayName) + '</td><td>' + esc(slotName[r.slotId] || '-') + '</td>' +
+          '<td>' + esc(r.pointName) + '</td><td class="num">' + r.seatNo + '</td>' +
+          '<td>' + esc(r.teacherName || '-') + '</td><td class="small muted">' + esc(r.department) + '</td>' +
+          '<td class="small">' + esc(r.rotationGroup) + '</td><td class="num">' + r.rotationOrder + '</td>' +
+          '<td>' + (r.pinMode === 'NONE' ? '<span class="muted small">—</span>' :
+            '<span class="tag tag-info">' + esc(r.pinModeLabel) + '</span>') + '</td>' +
+          (d.canEdit ? '<td class="nowrap">' +
+            '<button class="btn btn-sm" data-act="editAssign" data-id="' + esc(r.id) + '">แก้ไข</button> ' +
+            '<button class="btn btn-sm" data-act="delAssign" data-id="' + esc(r.id) + '">ลบ</button></td>' : '') +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div></div>';
+    body.innerHTML = html;
+    App.state._board = d;
+    bindAssignBoard(body, d);
+  });
+}
+
+function renderPinList(body) {
+  return call('pin.list', {}).then(function (d) {
+    if (!d.semester) {
+      body.innerHTML = '<div class="card"><div class="card-body">' +
+        emptyState('📌', 'ยังไม่ได้เปิดใช้ภาคเรียน', 'กรุณาเปิดใช้ภาคเรียนก่อน') + '</div></div>';
+      return;
+    }
+    var html = '<div class="card"><div class="card-head">' +
+      '<div><div class="card-title">ปักหมุดจุดเฉพาะบุคคล</div>' +
+      '<div class="card-sub">ที่นั่งที่ปักหมุดจะไม่ถูกหมุนเปลี่ยนจุด · ปักหมุดแล้ว ' +
+      nf(d.summary.pinned) + ' จาก ' + nf(d.summary.total) + ' ที่นั่ง</div></div>' +
+      '<div class="card-actions">' +
+      (d.canEdit ? '' : '<span class="tag tag-muted">ดูได้อย่างเดียว</span>') +
+      '</div></div><div class="card-body">';
+
+    if (!d.canEdit) {
+      html += '<div class="alert alert-INFO">บทบาทของท่านดูข้อมูลการปักหมุดได้ ' +
+        'แต่การตั้งค่าปักหมุดสงวนไว้สำหรับหัวหน้างานเวรและผู้ดูแลระบบ</div>';
+    }
+
+    if (!d.rows.length) {
+      html += emptyState('🪑', 'ยังไม่มีการจัดเวร', 'กรุณาจัดเวรในแท็บ "กระดานจัดเวร" ก่อน');
+    } else {
+      html += '<div class="table-wrap"><table class="tb"><thead><tr>' +
+        '<th>วัน</th><th>ช่วงเวลา</th><th>จุดเวร</th><th class="num">ที่</th><th>ครู</th>' +
+        '<th>กลุ่มหมุน</th><th>สถานะปักหมุด</th><th>เหตุผล</th>' +
+        (d.canEdit ? '<th></th>' : '') + '</tr></thead><tbody>';
+      d.rows.forEach(function (r) {
+        html += '<tr><td>' + esc(r.weekdayName) + '</td><td>' + esc(r.slotName) + '</td>' +
+          '<td>' + esc(r.pointName) + '</td><td class="num">' + r.seatNo + '</td>' +
+          '<td>' + esc(r.teacherName || '-') + '</td><td class="small">' + esc(r.rotationGroup) + '</td>' +
+          '<td>' + (r.pinMode === 'NONE' ? '<span class="muted small">ไม่ปักหมุด</span>' :
+            '<span class="tag tag-info">📌 ' + esc(r.pinModeLabel) + '</span>') + '</td>' +
+          '<td class="small muted">' + esc(r.pinReason || '—') + '</td>' +
+          (d.canEdit ? '<td class="nowrap"><button class="btn btn-sm" data-act="pin" data-id="' +
+            esc(r.id) + '">' + (r.pinMode === 'NONE' ? 'ปักหมุด' : 'แก้ไข') + '</button></td>' : '') +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div></div>';
+    body.innerHTML = html;
+    App.state._pin = d;
+    bindPinActions(body, d);
+  });
+}
+
+function renderRotation(body) {
+  return call('rotation.settings', {}).then(function (s) {
+    var opts = s.modeOptions.map(function (o) {
+      return '<option value="' + o.value + '"' + (o.value === s.mode ? ' selected' : '') + '>' +
+        esc(o.label) + '</option>';
+    }).join('');
+
+    body.innerHTML =
+      '<div class="card"><div class="card-head"><div>' +
+      '<div class="card-title">การหมุนเวร</div>' +
+      '<div class="card-sub">หมุนวัน = จันทร์→อังคาร→พุธ→พฤหัสบดี→ศุกร์→จันทร์ เมื่อขึ้นภาคเรียนใหม่ · ' +
+      'หมุนจุด = สลับจุดภายในวันตามรอบที่กำหนด</div></div></div><div class="card-body">' +
+      (s.canEdit ? '' : '<div class="alert alert-INFO">ดูได้อย่างเดียว — เฉพาะหัวหน้างานเวรและผู้ดูแลระบบที่แก้ไขได้</div>') +
+      '<div class="form-row">' +
+      '<div class="field"><label>โหมดหมุนจุดภายในวัน</label>' +
+      '<select class="input" id="rMode"' + (s.canEdit ? '' : ' disabled') + '>' + opts + '</select></div>' +
+      '<div class="field"><label>หมุนทุก ๆ กี่วันทำการ</label>' +
+      '<input type="number" class="input" id="rDays" min="1" max="60" value="' + s.nDays + '"' +
+      (s.canEdit ? '' : ' disabled') + '><div class="hint">ใช้เฉพาะโหมด "ทุก N วันทำการ"</div></div>' +
+      '<div class="field"><label>เลื่อนครั้งละกี่ตำแหน่ง</label>' +
+      '<input type="number" class="input" id="rStep" min="1" max="20" value="' + s.step + '"' +
+      (s.canEdit ? '' : ' disabled') + '></div>' +
+      '<div class="field"><label>เคารพการปักหมุด</label>' +
+      '<select class="input" id="rPin"' + (s.canEdit ? '' : ' disabled') + '>' +
+      '<option value="1"' + (s.respectPin ? ' selected' : '') + '>ใช่ — ที่นั่งที่ปักหมุดจะไม่ถูกหมุน</option>' +
+      '<option value="0"' + (!s.respectPin ? ' selected' : '') + '>ไม่ — หมุนทุกที่นั่ง</option>' +
+      '</select></div>' +
+      '<div class="field"><label>หมุนวันเมื่อขึ้นภาคเรียนใหม่</label>' +
+      '<select class="input" id="rDayOn"' + (s.canEdit ? '' : ' disabled') + '>' +
+      '<option value="1"' + (s.dayRotationEnabled ? ' selected' : '') + '>เปิด</option>' +
+      '<option value="0"' + (!s.dayRotationEnabled ? ' selected' : '') + '>ปิด</option></select></div>' +
+      '<div class="field"><label>เลื่อนวันครั้งละกี่วัน</label>' +
+      '<input type="number" class="input" id="rDayShift" min="1" max="4" value="' + s.dayRotationShift + '"' +
+      (s.canEdit ? '' : ' disabled') + '></div>' +
+      '</div><div class="flex">' +
+      (s.canEdit ? '<button class="btn btn-primary" id="rSave" type="button">บันทึกการตั้งค่า</button>' : '') +
+      '<button class="btn" id="rPreview" type="button">พรีวิวการหมุนจุด 4 สัปดาห์</button>' +
+      '<button class="btn" id="rDayPreview" type="button">พรีวิวการหมุนวัน</button>' +
+      '<button class="btn btn-ghost" id="rHistory" type="button">ประวัติการหมุน</button>' +
+      '</div></div></div><div id="rotResult"></div>';
+
+    bindRotation(body, s);
+  });
+}
+
+function renderGenerate(body) {
+  return call('setup.status', {}).then(function (st) {
+    var from = todayStr(), to = addDaysStr(from, 30);
+    body.innerHTML = '<div class="card"><div class="card-head"><div>' +
+      '<div class="card-title">สร้างตารางเวรรายวัน</div>' +
+      '<div class="card-sub">แปลงแม่แบบของภาคเรียนเป็นตารางจริงรายวัน พร้อมหมุนจุดตามที่ตั้งค่าไว้</div>' +
+      '</div></div><div class="card-body">' +
+      (st.activeSemester ? '<div class="alert alert-INFO">ภาคเรียนที่ใช้งาน: <b>' +
+        esc(st.activeSemester.name) + '</b> (' + esc(st.activeSemester.startDateThai) + ' – ' +
+        esc(st.activeSemester.endDateThai) + ')</div>' :
+        '<div class="alert alert-DANGER">ยังไม่ได้เปิดใช้ภาคเรียน</div>') +
+      '<div class="form-row">' +
+      '<div class="field"><label>ตั้งแต่วันที่</label>' + dateInput('gFrom', from) + '</div>' +
+      '<div class="field"><label>ถึงวันที่</label>' + dateInput('gTo', to) + '</div>' +
+      '<div class="field"><label>วันที่มีตารางอยู่แล้ว</label><select class="input" id="gRebuild">' +
+      '<option value="0">ข้ามไป (ปลอดภัยที่สุด)</option>' +
+      '<option value="1">สร้างใหม่ทับ (เฉพาะวันที่ยังไม่มีการเช็คอิน)</option></select></div>' +
+      '</div>' +
+      '<button class="btn btn-primary" id="gRun" type="button">สร้างตาราง</button>' +
+      '<div id="gResult" class="mt16"></div>' +
+      '</div></div>';
+    bindGenerate(body);
+  });
+}
+
+function renderWorkload(body) {
+  return call('assign.workload', {}).then(function (d) {
+    if (!d.rows) { body.innerHTML = emptyState('📊', 'ไม่มีข้อมูล', ''); return; }
+    var html = '<div class="card"><div class="card-head"><div>' +
+      '<div class="card-title">ภาระเวรรายบุคคล</div>' +
+      '<div class="card-sub">มีเวร ' + nf(d.stats.assigned) + ' คน · ยังไม่มีเวร ' +
+      nf(d.stats.unassigned) + ' คน · รวม ' + nf(d.stats.seats) + ' ที่นั่ง</div></div></div>' +
+      '<div class="card-body"><div class="table-wrap"><table class="tb"><thead><tr>' +
+      '<th>ครู</th><th>กลุ่มสาระ</th><th class="num">จำนวนเวร</th><th>วันที่มีเวร</th><th class="num">ปักหมุด</th>' +
+      '</tr></thead><tbody>';
+    d.rows.forEach(function (r) {
+      html += '<tr><td>' + esc(r.name) + '</td><td class="small muted">' + esc(r.department) + '</td>' +
+        '<td class="num">' + (r.count ? r.count : '<span class="tag tag-warn">0</span>') + '</td>' +
+        '<td class="small">' + esc(r.weekdays || '—') + '</td>' +
+        '<td class="num">' + (r.pinned || '') + '</td></tr>';
+    });
+    body.innerHTML = html + '</tbody></table></div></div></div>';
+  });
+}
+
+/* =================================================================
+ * 4) อนุมัติ
+ * ================================================================= */
+
+VIEWS.approve = function (root, state) {
+  var status = state.status || 'PENDING';
+  return call('swap.list', { status: status === 'ALL' ? '' : status, limit: 200 }).then(function (d) {
+    var filters = [{ k: 'PENDING', l: 'รออนุมัติ' }, { k: 'APPLIED', l: 'ดำเนินการแล้ว' },
+      { k: 'REJECTED', l: 'ไม่อนุมัติ' }, { k: 'ALL', l: 'ทั้งหมด' }];
+
+    var html = pageHead('อนุมัติการเปลี่ยนเวร',
+      'รออนุมัติ ' + nf(d.pending) + ' รายการ',
+      filters.map(function (f) {
+        return '<button class="btn btn-sm' + (status === f.k ? ' btn-primary' : '') +
+          '" data-status="' + f.k + '">' + f.l + '</button>';
+      }).join(''));
+
+    if (!d.rows.length) {
+      html += '<div class="card"><div class="card-body">' +
+        emptyState('✅', 'ไม่มีรายการ', 'ไม่พบคำขอในสถานะที่เลือก') + '</div></div>';
+    } else {
+      html += '<div class="card"><div class="card-body"><div class="table-wrap"><table class="tb"><thead><tr>' +
+        '<th>วันที่</th><th>จุด/ช่วงเวลา</th><th>จาก</th><th>เป็น</th><th>ประเภท</th><th>เหตุผล</th>' +
+        '<th>สถานะ</th><th>ผู้อนุมัติ</th><th></th></tr></thead><tbody>';
+      d.rows.forEach(function (r) {
+        var stTag = { PENDING: 'tag-warn', APPLIED: 'tag-ok', APPROVED: 'tag-ok', REJECTED: 'tag-danger' }[r.status] || 'tag-muted';
+        html += '<tr><td class="nowrap">' + esc(r.dateThai) + '</td>' +
+          '<td class="small">' + esc(r.pointName) + '<br><span class="muted">' + esc(r.slotName) + '</span></td>' +
+          '<td>' + esc(r.fromName) + '</td><td>' + esc(r.toName) + '</td>' +
+          '<td class="small">' + esc(r.typeLabel) + '</td>' +
+          '<td class="small">' + esc(r.reason) + '</td>' +
+          '<td><span class="tag ' + stTag + '">' + esc(r.statusLabel) + '</span></td>' +
+          '<td class="small">' + (r.approverName ? esc(r.approverName) + '<br><span class="muted">' +
+            esc(r.approvalLevelName) + '</span>' : '<span class="muted">—</span>') + '</td>' +
+          '<td class="nowrap">' +
+          (r.canDecide ? '<button class="btn btn-sm btn-ok" data-act="swapOk" data-id="' + esc(r.id) + '">อนุมัติ</button> ' +
+            '<button class="btn btn-sm btn-danger" data-act="swapNo" data-id="' + esc(r.id) + '">ไม่อนุมัติ</button>' : '') +
+          (r.canCancel ? '<button class="btn btn-sm" data-act="swapCancel" data-id="' + esc(r.id) + '">ยกเลิก</button>' : '') +
+          '</td></tr>';
+      });
+      html += '</tbody></table></div></div></div>';
+    }
+
+    root.innerHTML = html;
+    root.querySelectorAll('[data-status]').forEach(function (b) {
+      b.onclick = function () { go('approve', { status: b.getAttribute('data-status') }); };
+    });
+    bindApproveActions(root);
+  });
+};
+
+/* =================================================================
+ * 5) รายงาน
+ * ================================================================= */
+
+VIEWS.report = function (root, state) {
+  var tab = state.tab || 'daily';
+  var tabs = [
+    { k: 'daily', l: 'ปฏิบัติงานรายวัน' },
+    { k: 'group', l: 'สรุปแยกกลุ่ม' },
+    { k: 'evidence', l: 'หลักฐานไม่ครบ' },
+    { k: 'swap', l: 'การเปลี่ยนเวร' },
+    { k: 'incident', l: 'เหตุการณ์' },
+    { k: 'exec', l: 'ภาพรวมผู้บริหาร' }
+  ];
+
+  root.innerHTML = pageHead('รายงาน', 'ข้อมูลการปฏิบัติงานเวรและหลักฐานประกอบ') +
+    '<div class="tabs">' + tabs.map(function (t) {
+      return '<button class="tab' + (tab === t.k ? ' active' : '') + '" data-tab="' + t.k + '">' + t.l + '</button>';
+    }).join('') + '</div><div id="repBody"></div>';
+
+  root.querySelectorAll('[data-tab]').forEach(function (b) {
+    b.onclick = function () { go('report', { tab: b.getAttribute('data-tab') }); };
+  });
+
+  var body = $('repBody');
+  body.innerHTML = '<div class="empty"><div class="boot-spinner"></div></div>';
+
+  if (tab === 'daily') return renderReportDaily(body, state);
+  if (tab === 'group') return renderReportGroup(body, state);
+  if (tab === 'evidence') return renderReportEvidence(body, state);
+  if (tab === 'swap') return renderReportSwap(body, state);
+  if (tab === 'incident') return renderReportIncident(body, state);
+  return renderReportExec(body, state);
+};
+
+function renderReportDaily(body, state) {
+  var date = state.rdate || todayStr();
+  return call('report.daily', { date: date }).then(function (d) {
+    var s = d.summary;
+    var html = '<div class="toolbar">' +
+      '<div class="field"><label>วันที่</label>' + dateInput('rdDate', d.date) + '</div>' +
+      '<button class="btn btn-primary" id="rdGo" type="button">แสดง</button>' +
+      '<button class="btn" id="rdPdf" type="button">ออก PDF</button>' +
+      '<button class="btn" id="rdSheet" type="button">ส่งออกเป็นชีต</button>' +
+      '<button class="btn" id="rdPrint" type="button">พิมพ์</button>' +
+      '</div>';
+
+    html += '<div class="stat-grid">' +
+      statCard('เวรทั้งหมด', s.total, 'ช่อง', 'primary') +
+      statCard('อัตราการปฏิบัติงาน', s.attendRate, '%', s.attendRate >= 90 ? 'ok' : 'warn') +
+      statCard('หลักฐานครบ', s.evidenceRate, '%', s.evidenceRate >= 90 ? 'ok' : 'warn') +
+      statCard('ไม่อยู่', s.absent, 'ช่อง', s.absent ? 'danger' : 'ok') +
+      '</div>';
+
+    html += '<div class="card"><div class="card-head"><div>' +
+      '<div class="card-title">' + esc(d.dateThai) + '</div>' +
+      '<div class="card-sub">' + esc(d.schoolName) + ' · ออกรายงานโดย ' + esc(d.generatedBy) + '</div>' +
+      '</div></div><div class="card-body">';
+
+    if (!d.rows.length) {
+      html += emptyState('📭', 'ไม่มีข้อมูลเวรของวันนี้', 'ตรวจสอบว่าสร้างตารางรายวันแล้วหรือยัง');
+    } else {
+      html += '<div class="table-wrap"><table class="tb"><thead><tr>' +
+        '<th>จุดเวร</th><th>ช่วงเวลา</th><th>ครูตามตาราง</th><th>ครูที่ปฏิบัติจริง</th>' +
+        '<th>สถานะ</th><th>เข้า–ออก</th><th>หลักฐาน</th><th>ผู้อนุมัติการเปลี่ยนเวร</th>' +
+        '</tr></thead><tbody>';
+      d.rows.forEach(function (r) {
+        html += '<tr><td>' + esc(r.pointName) + (r.seatNo > 1 ? ' <span class="muted small">(ที่ ' + r.seatNo + ')</span>' : '') + '</td>' +
+          '<td class="small">' + esc(r.slotName) + '<br><span class="muted">' + esc(r.timeRange) + '</span></td>' +
+          '<td>' + esc(r.originalTeacherName || '-') + '</td>' +
+          '<td>' + (r.changed ? '<b>' + esc(r.effectiveTeacherName || '-') + '</b>' : esc(r.effectiveTeacherName || '-')) + '</td>' +
+          '<td>' + attendTag(r.attend, r.attendLabel) + (r.lateMinutes ? '<br><span class="small muted">สาย ' + r.lateMinutes + ' นาที</span>' : '') + '</td>' +
+          '<td class="small nowrap">' + esc(r.checkInAt || '-') + ' / ' + esc(r.checkOutAt || '-') +
+          (r.distanceM !== null && r.distanceM !== undefined ? '<br><span class="muted">📍 ' + nf(r.distanceM) + ' ม.</span>' : '') + '</td>' +
+          '<td class="small">' + evidenceTag(r.evidence, r.evidenceLabel) +
+          (r.photoCount ? '<br><span class="muted">📷 ' + r.photoCount + ' ภาพ</span>' : '') +
+          (r.incidentCount ? '<br><span class="muted">📝 ' + r.incidentCount + '</span>' : '') + '</td>' +
+          '<td class="small">' + (r.approval ?
+            esc(r.approval.approverName) + '<br><span class="muted">' + esc(r.approval.approvalLevelName) + '</span>' :
+            (r.changed ? '<span class="tag tag-danger">ไม่พบการอนุมัติ</span>' : '<span class="muted">—</span>')) + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div></div>';
+    body.innerHTML = html;
+    bindReportDaily(body, d);
+  });
+}
+
+function renderReportGroup(body, state) {
+  var from = state.gfrom || addDaysStr(todayStr(), -30);
+  var to = state.gto || todayStr();
+  var groupBy = state.groupBy || 'DEPARTMENT';
+
+  return call('report.group', { from: from, to: to, groupBy: groupBy }).then(function (d) {
+    var opts = d.groupOptions.map(function (o) {
+      return '<option value="' + o.value + '"' + (o.value === d.groupBy ? ' selected' : '') + '>' +
+        esc(o.label) + '</option>';
+    }).join('');
+
+    var html = '<div class="toolbar">' +
+      '<div class="field"><label>ตั้งแต่</label>' + dateInput('gFrom2', d.from) + '</div>' +
+      '<div class="field"><label>ถึง</label>' + dateInput('gTo2', d.to) + '</div>' +
+      '<div class="field"><label>จัดกลุ่มตาม</label><select class="input" id="gDim">' + opts + '</select></div>' +
+      '<button class="btn btn-primary" id="gGo" type="button">แสดง</button>' +
+      '<button class="btn" id="gSheet" type="button">ส่งออกเป็นชีต</button>' +
+      '</div>';
+
+    var s = d.overall;
+    html += '<div class="stat-grid">' +
+      statCard('เวรทั้งหมด', s.total, 'ช่อง', 'primary') +
+      statCard('อยู่ครบ', s.present, 'ช่อง', 'ok') +
+      statCard('ไม่อยู่', s.absent, 'ช่อง', s.absent ? 'danger' : 'ok') +
+      statCard('อัตราการปฏิบัติงาน', s.attendRate, '%', s.attendRate >= 90 ? 'ok' : 'warn') +
+      '</div>';
+
+    html += '<div class="card"><div class="card-head"><div>' +
+      '<div class="card-title">สรุปแยกตาม' + esc(d.groupByLabel) + '</div>' +
+      '<div class="card-sub">' + esc(d.fromThai) + ' ถึง ' + esc(d.toThai) +
+      ' · ยอดรวมทุกกลุ่ม ' + nf(d.checksum.groupsTotal) + ' = ทั้งหมด ' + nf(d.checksum.rowsTotal) +
+      (d.checksum.groupsTotal === d.checksum.rowsTotal ? ' ✓' : ' ⚠') + '</div></div></div>' +
+      '<div class="card-body">';
+
+    if (!d.groups.length) {
+      html += emptyState('📊', 'ไม่มีข้อมูลในช่วงที่เลือก', 'ลองขยายช่วงวันที่');
+    } else {
+      html += '<div class="table-wrap"><table class="tb"><thead><tr>' +
+        '<th>' + esc(d.groupByLabel) + '</th><th class="num">ครู</th><th class="num">เวร</th>' +
+        '<th class="num">อยู่ครบ</th><th class="num">สาย</th><th class="num">ไม่ครบ</th>' +
+        '<th class="num">ไม่อยู่</th><th class="num">เปลี่ยนเวร</th>' +
+        '<th style="min-width:130px">% ปฏิบัติงาน</th><th></th></tr></thead><tbody>';
+      d.groups.forEach(function (g) {
+        html += '<tr><td><b>' + esc(g.group) + '</b></td>' +
+          '<td class="num">' + nf(g.teacherCount) + '</td><td class="num">' + nf(g.duties) + '</td>' +
+          '<td class="num">' + nf(g.present) + '</td><td class="num">' + nf(g.late) + '</td>' +
+          '<td class="num">' + nf(g.partial) + '</td>' +
+          '<td class="num">' + (g.absent ? '<span class="tag tag-danger">' + g.absent + '</span>' : '0') + '</td>' +
+          '<td class="num">' + nf(g.changed) + '</td>' +
+          '<td>' + bar(g.attendRate) + '</td>' +
+          '<td><button class="btn btn-sm" data-drill="' + esc(g.group) + '">ดูรายชื่อ</button></td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div></div><div id="drillBox"></div>';
+
+    body.innerHTML = html;
+    bindReportGroup(body, d);
+  });
+}
+
+function renderReportEvidence(body, state) {
+  var from = state.efrom || addDaysStr(todayStr(), -14);
+  var to = state.eto || todayStr();
+  return call('report.evidence', { from: from, to: to }).then(function (d) {
+    var html = '<div class="toolbar">' +
+      '<div class="field"><label>ตั้งแต่</label>' + dateInput('eFrom', d.from) + '</div>' +
+      '<div class="field"><label>ถึง</label>' + dateInput('eTo', d.to) + '</div>' +
+      '<button class="btn btn-primary" id="eGo" type="button">แสดง</button></div>';
+
+    html += '<div class="card"><div class="card-head"><div>' +
+      '<div class="card-title">เวรที่หลักฐานไม่ครบ</div>' +
+      '<div class="card-sub">พบ ' + nf(d.total) + ' รายการที่ต้องติดตาม</div></div></div><div class="card-body">';
+
+    if (!d.rows.length) {
+      html += emptyState('🎉', 'หลักฐานครบทุกรายการ', 'ไม่พบเวรที่ขาดหลักฐานในช่วงที่เลือก');
+    } else {
+      html += '<div class="table-wrap"><table class="tb"><thead><tr>' +
+        '<th>วันที่</th><th>จุดเวร</th><th>ช่วงเวลา</th><th>ครู</th><th>กลุ่มสาระ</th>' +
+        '<th>สถานะ</th><th>หลักฐาน</th><th>รายละเอียด</th></tr></thead><tbody>';
+      d.rows.forEach(function (r) {
+        html += '<tr><td class="nowrap">' + esc(r.dateThai) + '</td><td>' + esc(r.pointName) + '</td>' +
+          '<td class="small">' + esc(r.slotName) + '</td><td>' + esc(r.teacherName || '-') + '</td>' +
+          '<td class="small muted">' + esc(r.department) + '</td>' +
+          '<td>' + attendTag(r.attend, r.attendLabel) + '</td>' +
+          '<td>' + evidenceTag(r.evidence, r.evidenceLabel) + '</td>' +
+          '<td class="small muted">' + (r.checkInAt ? 'เข้า ' + esc(r.checkInAt) : 'ไม่มีการเช็คอิน') +
+          ' · ภาพ ' + r.photoCount + (r.geoLabel ? ' · ' + esc(r.geoLabel) : '') + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    body.innerHTML = html + '</div></div>';
+    var g = $('eGo');
+    if (g) g.onclick = function () {
+      go('report', { tab: 'evidence', efrom: $('eFrom').value, eto: $('eTo').value });
+    };
+  });
+}
+
+function renderReportSwap(body, state) {
+  var from = state.sfrom || addDaysStr(todayStr(), -30);
+  var to = state.sto || todayStr();
+  return call('report.swapLog', { from: from, to: to }).then(function (d) {
+    var html = '<div class="toolbar">' +
+      '<div class="field"><label>ตั้งแต่</label>' + dateInput('sFrom', d.from) + '</div>' +
+      '<div class="field"><label>ถึง</label>' + dateInput('sTo', d.to) + '</div>' +
+      '<button class="btn btn-primary" id="sGo" type="button">แสดง</button>' +
+      '<button class="btn" id="sSheet" type="button">ส่งออกเป็นชีต</button></div>';
+
+    html += '<div class="stat-grid">' + d.byLevel.map(function (l) {
+      return statCard(l.name, l.count, 'รายการ', l.level === 0 && l.count ? 'danger' : '');
+    }).join('') + '</div>';
+
+    html += '<div class="card"><div class="card-head"><div>' +
+      '<div class="card-title">บันทึกการเปลี่ยนเวรและสายการอนุมัติ</div>' +
+      '<div class="card-sub">' + nf(d.total) + ' รายการ</div></div></div><div class="card-body">';
+
+    if (!d.rows.length) {
+      html += emptyState('🔁', 'ไม่มีการเปลี่ยนเวร', 'ไม่พบการเปลี่ยนเวรในช่วงที่เลือก');
+    } else {
+      html += '<div class="table-wrap"><table class="tb"><thead><tr>' +
+        '<th>วันที่</th><th>จุด/ช่วงเวลา</th><th>ครูตามตาราง</th><th>ครูที่ปฏิบัติจริง</th>' +
+        '<th>ประเภท</th><th>เหตุผล</th><th>ผู้อนุมัติ</th><th>ระดับ</th></tr></thead><tbody>';
+      d.rows.forEach(function (r) {
+        html += '<tr><td class="nowrap">' + esc(r.dateThai) + '</td>' +
+          '<td class="small">' + esc(r.pointName) + '<br><span class="muted">' + esc(r.slotName) + '</span></td>' +
+          '<td>' + esc(r.originalTeacherName || '-') + '</td><td><b>' + esc(r.effectiveTeacherName || '-') + '</b></td>' +
+          '<td class="small">' + esc(r.type) + '</td><td class="small">' + esc(r.reason) + '</td>' +
+          '<td>' + esc(r.approverName || '-') + '</td>' +
+          '<td>' + (r.approved ? '<span class="tag tag-ok">' + esc(r.approvalLevelName) + '</span>' :
+            '<span class="tag tag-danger">ไม่พบการอนุมัติ</span>') + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    body.innerHTML = html + '</div></div>';
+    bindReportSwap(body, d);
+  });
+}
+
+function renderReportIncident(body, state) {
+  var from = state.ifrom || addDaysStr(todayStr(), -30);
+  var to = state.ito || todayStr();
+  return call('incident.list', { from: from, to: to }).then(function (d) {
+    var html = '<div class="toolbar">' +
+      '<div class="field"><label>ตั้งแต่</label>' + dateInput('iFrom', from) + '</div>' +
+      '<div class="field"><label>ถึง</label>' + dateInput('iTo', to) + '</div>' +
+      '<button class="btn btn-primary" id="iGo" type="button">แสดง</button></div>';
+
+    html += '<div class="card"><div class="card-head"><div>' +
+      '<div class="card-title">เหตุการณ์ระหว่างอยู่เวร</div>' +
+      '<div class="card-sub">ทั้งหมด ' + nf(d.total) + ' · รอดำเนินการ ' + nf(d.open) + '</div></div></div>' +
+      '<div class="card-body">';
+
+    if (!d.rows.length) {
+      html += emptyState('🕊️', 'ไม่มีเหตุการณ์', 'ไม่พบการรายงานเหตุการณ์ในช่วงที่เลือก');
+    } else {
+      html += '<div class="table-wrap"><table class="tb"><thead><tr>' +
+        '<th>วันที่</th><th>จุด</th><th>ผู้รายงาน</th><th>ประเภท</th><th>ระดับ</th>' +
+        '<th>เรื่อง</th><th>สถานะ</th><th></th></tr></thead><tbody>';
+      d.rows.forEach(function (r) {
+        var sev = { LOW: 'tag-muted', MEDIUM: 'tag-info', HIGH: 'tag-warn', CRITICAL: 'tag-danger' }[r.severity] || 'tag-muted';
+        var stt = { OPEN: 'tag-danger', HANDLING: 'tag-warn', CLOSED: 'tag-ok' }[r.status] || 'tag-muted';
+        html += '<tr><td class="nowrap">' + esc(r.dateThai) + '</td><td>' + esc(r.pointName) + '</td>' +
+          '<td>' + esc(r.reporterName) + '</td><td class="small">' + esc(r.categoryLabel) + '</td>' +
+          '<td><span class="tag ' + sev + '">' + esc(r.severityLabel) + '</span></td>' +
+          '<td><b>' + esc(r.title) + '</b><br><span class="small muted">' + esc(r.detail) + '</span></td>' +
+          '<td><span class="tag ' + stt + '">' + esc(r.statusLabel) + '</span></td>' +
+          '<td>' + (r.canHandle && r.status !== 'CLOSED' ?
+            '<button class="btn btn-sm" data-act="handleInc" data-id="' + esc(r.id) + '">ดำเนินการ</button>' : '') +
+          '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    body.innerHTML = html + '</div></div>';
+    var g = $('iGo');
+    if (g) g.onclick = function () {
+      go('report', { tab: 'incident', ifrom: $('iFrom').value, ito: $('iTo').value });
+    };
+    bindIncidentActions(body);
+  });
+}
+
+function renderReportExec(body, state) {
+  var from = state.xfrom || addDaysStr(todayStr(), -29);
+  var to = state.xto || todayStr();
+  return call('dash.overview', { from: from, to: to }).then(function (d) {
+    var s = d.overall;
+    var html = '<div class="toolbar">' +
+      '<div class="field"><label>ตั้งแต่</label>' + dateInput('xFrom', d.from) + '</div>' +
+      '<div class="field"><label>ถึง</label>' + dateInput('xTo', d.to) + '</div>' +
+      '<button class="btn btn-primary" id="xGo" type="button">แสดง</button></div>';
+
+    html += '<div class="stat-grid">' +
+      statCard('เวรทั้งหมด', s.total, 'ช่อง', 'primary') +
+      statCard('อัตราการปฏิบัติงาน', s.attendRate, '%', s.attendRate >= 90 ? 'ok' : 'warn') +
+      statCard('หลักฐานครบ', s.evidenceRate, '%', s.evidenceRate >= 90 ? 'ok' : 'warn') +
+      statCard('คำขอรออนุมัติ', d.pendingSwaps, 'รายการ', d.pendingSwaps ? 'warn' : 'ok') +
+      statCard('เหตุการณ์ค้าง', d.openIncidents, 'รายการ', d.openIncidents ? 'danger' : 'ok') +
+      '</div>';
+
+    html += '<div class="card"><div class="card-head"><div class="card-title">กลุ่มสาระที่ควรติดตาม</div></div>' +
+      '<div class="card-body"><div class="table-wrap"><table class="tb"><thead><tr>' +
+      '<th>กลุ่มสาระ</th><th class="num">เวร</th><th class="num">ไม่อยู่</th><th style="min-width:140px">% ปฏิบัติงาน</th>' +
+      '</tr></thead><tbody>';
+    d.lowestDepartments.forEach(function (g) {
+      html += '<tr><td>' + esc(g.group) + '</td><td class="num">' + nf(g.total) + '</td>' +
+        '<td class="num">' + nf(g.absent) + '</td><td>' + bar(g.attendRate) + '</td></tr>';
+    });
+    html += '</tbody></table></div></div></div>';
+
+    html += '<div class="card"><div class="card-head"><div class="card-title">แนวโน้มรายวัน</div></div>' +
+      '<div class="card-body"><div class="table-wrap"><table class="tb"><thead><tr>' +
+      '<th>วันที่</th><th class="num">เวร</th><th style="min-width:140px">% ปฏิบัติงาน</th>' +
+      '<th style="min-width:140px">% หลักฐานครบ</th></tr></thead><tbody>';
+    d.trend.slice(-20).reverse().forEach(function (t) {
+      html += '<tr><td class="nowrap">' + esc(t.dateThai) + '</td><td class="num">' + nf(t.total) + '</td>' +
+        '<td>' + bar(t.attendRate) + '</td><td>' + bar(t.evidenceRate) + '</td></tr>';
+    });
+    body.innerHTML = html + '</tbody></table></div></div></div>';
+
+    var g2 = $('xGo');
+    if (g2) g2.onclick = function () {
+      go('report', { tab: 'exec', xfrom: $('xFrom').value, xto: $('xTo').value });
+    };
+  });
+}
+
+/* =================================================================
+ * 6) ข้อมูลหลัก
+ * ================================================================= */
+
+VIEWS.master = function (root, state) {
+  var tab = state.tab || 'teacher';
+  var tabs = [
+    { k: 'teacher', l: 'ครู' },
+    { k: 'slot', l: 'ช่วงเวลา' },
+    { k: 'point', l: 'จุดเวร' },
+    { k: 'semester', l: 'ภาคเรียน' },
+    { k: 'calendar', l: 'ปฏิทิน' }
+  ];
+
+  root.innerHTML = pageHead('ข้อมูลหลัก', 'ครู ช่วงเวลา จุดเวร ภาคเรียน และปฏิทิน') +
+    '<div class="tabs">' + tabs.map(function (t) {
+      return '<button class="tab' + (tab === t.k ? ' active' : '') + '" data-tab="' + t.k + '">' + t.l + '</button>';
+    }).join('') + '</div><div id="masterBody"></div>';
+
+  root.querySelectorAll('[data-tab]').forEach(function (b) {
+    b.onclick = function () { go('master', { tab: b.getAttribute('data-tab') }); };
+  });
+
+  var body = $('masterBody');
+  body.innerHTML = '<div class="empty"><div class="boot-spinner"></div></div>';
+
+  if (tab === 'teacher') return renderTeachers(body, state);
+  if (tab === 'slot') return renderSlots(body);
+  if (tab === 'point') return renderPoints(body);
+  if (tab === 'semester') return renderSemesters(body);
+  return renderCalendar(body, state);
+};
+
+function renderTeachers(body, state) {
+  return call('teacher.list', { includeInactive: true, q: state.q || '' }).then(function (rows) {
+    var html = '<div class="card"><div class="card-head">' +
+      '<div><div class="card-title">ทะเบียนครู</div>' +
+      '<div class="card-sub">ทั้งหมด ' + nf(rows.length) + ' คน</div></div>' +
+      '<div class="card-actions">' +
+      '<input class="input" id="tQ" placeholder="ค้นหาชื่อ/อีเมล/กลุ่มสาระ" value="' + esc(state.q || '') + '" style="width:220px">' +
+      '<button class="btn btn-sm" id="tSearch" type="button">ค้นหา</button>' +
+      '<button class="btn btn-sm" id="tImport" type="button">นำเข้าหลายรายการ</button>' +
+      '<button class="btn btn-sm btn-primary" id="tAdd" type="button">+ เพิ่มครู</button>' +
+      '</div></div><div class="card-body">';
+
+    if (!rows.length) {
+      html += emptyState('👥', 'ยังไม่มีข้อมูลครู',
+        'เพิ่มทีละคน หรือวางข้อมูลจาก Excel/Google Sheets เพื่อนำเข้าหลายรายการพร้อมกัน',
+        '<button class="btn btn-primary" id="tAdd2" type="button">+ เพิ่มครูคนแรก</button>');
+    } else {
+      html += '<div class="table-wrap"><table class="tb"><thead><tr>' +
+        '<th>รหัส</th><th>ชื่อ-สกุล</th><th>อีเมล</th><th>กลุ่มสาระ</th><th>บทบาท</th>' +
+        '<th>สถานะ</th><th></th></tr></thead><tbody>';
+      rows.forEach(function (t) {
+        html += '<tr><td class="small">' + esc(t.code) + '</td><td>' + esc(t.name) + '</td>' +
+          '<td class="small muted">' + esc(t.email || '') + '</td>' +
+          '<td class="small">' + esc(t.department) + '</td>' +
+          '<td class="small">' + esc(t.roleName || '') + '</td>' +
+          '<td>' + (t.status === 'ACTIVE' ? '<span class="tag tag-ok">ใช้งาน</span>' :
+            '<span class="tag tag-muted">ระงับ</span>') + '</td>' +
+          '<td class="nowrap"><button class="btn btn-sm" data-act="editTeacher" data-id="' + esc(t.id) + '">แก้ไข</button> ' +
+          '<button class="btn btn-sm" data-act="toggleTeacher" data-id="' + esc(t.id) + '" data-status="' +
+          (t.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE') + '">' +
+          (t.status === 'ACTIVE' ? 'ระงับ' : 'เปิดใช้') + '</button></td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    body.innerHTML = html + '</div></div>';
+    bindTeacherActions(body);
+  });
+}
+
+function renderSlots(body) {
+  return call('slot.list', { includeInactive: true }).then(function (rows) {
+    var html = '<div class="card"><div class="card-head">' +
+      '<div><div class="card-title">ช่วงเวลาเวร</div><div class="card-sub">เช่น เวรเช้า พักกลางวัน เวรเย็น</div></div>' +
+      '<div class="card-actions"><button class="btn btn-sm btn-primary" id="sAdd" type="button">+ เพิ่มช่วงเวลา</button></div>' +
+      '</div><div class="card-body">';
+    if (!rows.length) {
+      html += emptyState('⏰', 'ยังไม่มีช่วงเวลา', 'กำหนดช่วงเวลาเวรก่อน เช่น 07:00–08:20');
+    } else {
+      html += '<div class="table-wrap"><table class="tb"><thead><tr><th>ลำดับ</th><th>รหัส</th>' +
+        '<th>ชื่อ</th><th>เริ่ม</th><th>สิ้นสุด</th><th>สถานะ</th><th></th></tr></thead><tbody>';
+      rows.forEach(function (s) {
+        html += '<tr><td class="num">' + s.sortOrder + '</td><td class="small">' + esc(s.code) + '</td>' +
+          '<td>' + esc(s.name) + '</td><td>' + esc(s.startTime) + '</td><td>' + esc(s.endTime) + '</td>' +
+          '<td>' + (s.status === 'ACTIVE' ? '<span class="tag tag-ok">ใช้งาน</span>' :
+            '<span class="tag tag-muted">ปิด</span>') + '</td>' +
+          '<td><button class="btn btn-sm" data-act="editSlot" data-id="' + esc(s.id) + '">แก้ไข</button></td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    body.innerHTML = html + '</div></div>';
+    App.state._slots = rows;
+    bindSlotActions(body, rows);
+  });
+}
+
+function renderPoints(body) {
+  return call('point.list', { includeInactive: true }).then(function (rows) {
+    var html = '<div class="card"><div class="card-head">' +
+      '<div><div class="card-title">จุดเวร</div>' +
+      '<div class="card-sub">พิกัดและรัศมีใช้ตรวจสอบว่าครูอยู่ที่จุดจริง</div></div>' +
+      '<div class="card-actions"><button class="btn btn-sm btn-primary" id="pAdd" type="button">+ เพิ่มจุดเวร</button></div>' +
+      '</div><div class="card-body">';
+    if (!rows.length) {
+      html += emptyState('📍', 'ยังไม่มีจุดเวร', 'กำหนดจุดเวรพร้อมพิกัด เช่น ประตูหน้าโรงเรียน');
+    } else {
+      html += '<div class="table-wrap"><table class="tb"><thead><tr><th>ลำดับ</th><th>รหัส</th><th>ชื่อจุด</th>' +
+        '<th class="num">ที่นั่ง</th><th>กลุ่มหมุน</th><th class="num">รัศมี</th><th>พิกัด</th>' +
+        '<th>สถานะ</th><th></th></tr></thead><tbody>';
+      rows.forEach(function (p) {
+        html += '<tr><td class="num">' + p.sortOrder + '</td><td class="small">' + esc(p.code) + '</td>' +
+          '<td>' + esc(p.name) + '</td><td class="num">' + p.seatCount + '</td>' +
+          '<td class="small">' + esc(p.rotationGroup) + '</td><td class="num">' + p.radius + ' ม.</td>' +
+          '<td class="small muted">' + (p.lat || p.lng ? p.lat.toFixed(5) + ', ' + p.lng.toFixed(5) : '—') + '</td>' +
+          '<td>' + (p.status === 'ACTIVE' ? '<span class="tag tag-ok">ใช้งาน</span>' :
+            '<span class="tag tag-muted">ปิด</span>') + '</td>' +
+          '<td><button class="btn btn-sm" data-act="editPoint" data-id="' + esc(p.id) + '">แก้ไข</button></td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    body.innerHTML = html + '</div></div>';
+    App.state._points = rows;
+    bindPointActions(body, rows);
+  });
+}
+
+function renderSemesters(body) {
+  return call('semester.list', {}).then(function (rows) {
+    var html = '<div class="card"><div class="card-head">' +
+      '<div><div class="card-title">ภาคเรียน</div>' +
+      '<div class="card-sub">ภาคเรียนที่เปิดใช้งานจะถูกใช้ในการจัดเวรและสร้างตาราง</div></div>' +
+      '<div class="card-actions"><button class="btn btn-sm btn-primary" id="semAdd" type="button">+ เพิ่มภาคเรียน</button></div>' +
+      '</div><div class="card-body">';
+    if (!rows.length) {
+      html += emptyState('📅', 'ยังไม่มีภาคเรียน', 'สร้างภาคเรียนพร้อมวันเปิด-ปิด แล้วกดเปิดใช้งาน');
+    } else {
+      html += '<div class="table-wrap"><table class="tb"><thead><tr><th>ชื่อ</th><th>ปีการศึกษา</th>' +
+        '<th>ภาคเรียน</th><th>เปิด</th><th>ปิด</th><th>สถานะ</th><th></th></tr></thead><tbody>';
+      rows.forEach(function (s) {
+        html += '<tr><td><b>' + esc(s.name) + '</b></td>' +
+          '<td>' + (s.yearBe >= 2500 ? s.yearBe : '<span class="tag tag-danger">' + s.yearBe + ' (ไม่ถูกต้อง)</span>') + '</td>' +
+          '<td>' + ([1, 2].indexOf(s.term) >= 0 ? s.term : '<span class="tag tag-danger">' + s.term + '</span>') + '</td>' +
+          '<td class="small">' + esc(s.startDateThai) + '</td><td class="small">' + esc(s.endDateThai) + '</td>' +
+          '<td>' + (s.isActive ? '<span class="tag tag-ok">เปิดใช้งาน</span>' : '<span class="tag tag-muted">—</span>') + '</td>' +
+          '<td class="nowrap"><button class="btn btn-sm" data-act="editSem" data-id="' + esc(s.id) + '">แก้ไข</button> ' +
+          (s.isActive ? '' : '<button class="btn btn-sm" data-act="actSem" data-id="' + esc(s.id) + '">เปิดใช้</button>') +
+          '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    body.innerHTML = html + '</div></div>';
+    App.state._semesters = rows;
+    bindSemesterActions(body, rows);
+  });
+}
+
+function renderCalendar(body, state) {
+  return call('calendar.list', { semesterId: state.semesterId || '' }).then(function (rows) {
+    var html = '<div class="card"><div class="card-head">' +
+      '<div><div class="card-title">ปฏิทินวันหยุด / วันพิเศษ</div>' +
+      '<div class="card-sub">วันหยุดจะไม่ถูกสร้างตารางเวร และไม่ถูกนับในรอบการหมุนจุด</div></div>' +
+      '<div class="card-actions"><button class="btn btn-sm" id="calRange" type="button">+ เพิ่มเป็นช่วง</button>' +
+      '<button class="btn btn-sm btn-primary" id="calAdd" type="button">+ เพิ่มวัน</button></div>' +
+      '</div><div class="card-body">';
+    if (!rows.length) {
+      html += emptyState('🗓️', 'ยังไม่มีการกำหนดวันพิเศษ',
+        'ค่าเริ่มต้น: จันทร์–ศุกร์ มีเวร, เสาร์–อาทิตย์ ไม่มีเวร');
+    } else {
+      html += '<div class="table-wrap"><table class="tb"><thead><tr><th>วันที่</th><th>ประเภท</th>' +
+        '<th>หมายเหตุ</th><th></th></tr></thead><tbody>';
+      rows.forEach(function (c) {
+        html += '<tr><td>' + esc(c.dateThai) + '</td>' +
+          '<td><span class="tag ' + (c.dayType === 'HOLIDAY' || c.dayType === 'CLOSED' ? 'tag-danger' : 'tag-info') +
+          '">' + esc(c.dayTypeName) + '</span></td>' +
+          '<td class="small muted">' + esc(c.note) + '</td>' +
+          '<td><button class="btn btn-sm" data-act="delCal" data-id="' + esc(c.id) + '">ลบ</button></td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    body.innerHTML = html + '</div></div>';
+    bindCalendarActions(body);
+  });
+}
+
+/* =================================================================
+ * 7) ตั้งค่า
+ * ================================================================= */
+
+VIEWS.settings = function (root) {
+  return Promise.all([call('config.list', {}), call('setup.status', {})]).then(function (res) {
+    var groups = res[0], setup = res[1];
+
+    var html = pageHead('ตั้งค่าระบบ', 'ค่าที่มีผลกับการทำงานของทั้งระบบ');
+
+    if (!setup.ready) {
+      html += '<div class="card"><div class="card-head"><div>' +
+        '<div class="card-title">ความพร้อมของระบบ (' + setup.doneCount + '/' + setup.totalSteps + ')</div>' +
+        '<div class="card-sub">ทำให้ครบเพื่อให้ระบบใช้งานได้เต็มรูปแบบ</div></div></div><div class="card-body">' +
+        '<div class="steps">' + setup.steps.map(function (st, i) {
+          return '<div class="step' + (st.done ? ' done' : '') + '">' +
+            '<div class="step-num">' + (st.done ? '✓' : (i + 1)) + '</div>' +
+            '<div class="step-label">' + esc(st.label) + '</div>' +
+            '<div class="step-count">' + (st.done ? nf(st.count) : 'ยังไม่ได้ทำ') + '</div>' +
+            (st.done ? '' : '<button class="btn btn-sm btn-primary" data-nav="' + st.nav + '">ไปทำ</button>') +
+            '</div>';
+        }).join('') + '</div>' +
+        '<div class="mt16"><button class="btn" type="button" id="seedSample">ใส่ข้อมูลตัวอย่าง</button></div>' +
+        '</div></div>';
+    }
+
+    groups.forEach(function (g) {
+      html += '<div class="card"><div class="card-head"><div class="card-title">' + esc(g.group) + '</div></div>' +
+        '<div class="card-body"><div class="form-row">';
+      g.items.forEach(function (it) {
+        html += '<div class="field"><label>' + esc(it.label) + '</label>';
+        if (it.type === 'bool') {
+          html += '<select class="input cfg" data-key="' + esc(it.key) + '">' +
+            '<option value="true"' + (it.value ? ' selected' : '') + '>เปิด</option>' +
+            '<option value="false"' + (!it.value ? ' selected' : '') + '>ปิด</option></select>';
+        } else if (it.options) {
+          html += '<select class="input cfg" data-key="' + esc(it.key) + '">' +
+            it.options.map(function (o) {
+              return '<option value="' + esc(o) + '"' + (o === it.value ? ' selected' : '') + '>' + esc(o) + '</option>';
+            }).join('') + '</select>';
+        } else if (it.type === 'number') {
+          html += '<input type="number" class="input cfg" data-key="' + esc(it.key) + '" value="' + esc(it.value) + '">';
+        } else {
+          html += '<input class="input cfg" data-key="' + esc(it.key) + '" value="' + esc(it.value) + '">';
+        }
+        html += '<div class="hint">' + esc(it.key) + '</div></div>';
+      });
+      html += '</div></div></div>';
+    });
+
+    html += '<div class="flex mt16"><button class="btn btn-primary" id="cfgSave" type="button">บันทึกการตั้งค่าทั้งหมด</button>' +
+      '<button class="btn" id="cfgDiag" type="button">ตรวจสอบระบบ</button></div>';
+
+    root.innerHTML = html;
+    bindSettings(root);
+    bindSetupButtons(root);
+    bindNavButtons(root);
+  });
+};
+
+/* =================================================================
+ * 8) ระบบ
+ * ================================================================= */
+
+VIEWS.system = function (root) {
+  return call('system.selfTest', {}).then(function (d) {
+    var html = pageHead('ตรวจสอบระบบ',
+      'ผลการตรวจ ' + (d.ok ? '<span class="tag tag-ok">ผ่านทั้งหมด</span>' :
+        '<span class="tag tag-danger">พบข้อผิดพลาด ' + d.errors + ' รายการ</span>') +
+      (d.warnings ? ' <span class="tag tag-warn">คำเตือน ' + d.warnings + '</span>' : ''),
+      '<button class="btn btn-sm" id="sysRefresh" type="button">ตรวจใหม่</button>' +
+      '<button class="btn btn-sm" id="sysCache" type="button">ล้างแคช</button>' +
+      '<button class="btn btn-sm btn-danger" id="sysRepair" type="button">ซ่อมข้อมูล</button>');
+
+    html += '<div class="card"><div class="card-body"><div class="table-wrap"><table class="tb"><thead><tr>' +
+      '<th>รายการตรวจ</th><th>ผล</th><th>รายละเอียด</th><th>วิธีแก้</th></tr></thead><tbody>';
+    d.checks.forEach(function (c) {
+      var tag = c.ok ? '<span class="tag tag-ok">ผ่าน</span>' :
+        (c.level === 'WARN' ? '<span class="tag tag-warn">ควรตรวจ</span>' :
+          '<span class="tag tag-danger">ไม่ผ่าน</span>');
+      html += '<tr><td>' + esc(c.name) + '</td><td>' + tag + '</td>' +
+        '<td class="small">' + esc(c.detail) + '</td>' +
+        '<td class="small muted">' + (c.ok ? '' : esc(c.fix)) + '</td></tr>';
+    });
+    html += '</tbody></table></div></div></div>';
+
+    html += '<div class="card"><div class="card-head"><div class="card-title">ข้อมูลผู้ใช้ปัจจุบัน</div></div>' +
+      '<div class="card-body"><div class="form-row">' +
+      '<div class="field"><label>อีเมล</label><div>' + esc(d.user.email) + '</div></div>' +
+      '<div class="field"><label>ชื่อ</label><div>' + esc(d.user.name) + '</div></div>' +
+      '<div class="field"><label>บทบาท</label><div>' + esc(d.user.roleName) + ' (' + esc(d.user.role) + ')</div></div>' +
+      '<div class="field"><label>สถิติการอ่านข้อมูล</label><div class="small muted">อ่านชีต ' +
+      d.stats.sheetReads + ' ครั้ง · แคช ' + d.stats.cacheHits + ' ครั้ง</div></div>' +
+      '</div></div></div>';
+
+    root.innerHTML = html;
+    bindSystemActions(root);
+  });
+};
+
+function bindNavButtons(scope) {
+  (scope || document).querySelectorAll('[data-nav]').forEach(function (b) {
+    b.onclick = function () { go(b.getAttribute('data-nav')); };
+  });
+}
+</script>

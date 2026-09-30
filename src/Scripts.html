@@ -1,0 +1,470 @@
+<script>
+/* =================================================================
+ * Scripts.html — แกนกลางฝั่งหน้าเว็บ
+ * ================================================================= */
+
+var App = {
+  boot: null,           // ข้อมูลตั้งต้นจากเซิร์ฟเวอร์
+  view: 'today',        // หน้าที่กำลังแสดง
+  state: {},            // สถานะของแต่ละหน้า
+  ready: false
+};
+
+var CALL_TIMEOUT = 90000;
+var CACHE_TTL = 45000;
+var _cache = {};
+
+/* ---------------- เรียกเซิร์ฟเวอร์ ---------------- */
+
+/**
+ * เรียก api(action, payload) ฝั่งเซิร์ฟเวอร์
+ * คืน Promise ที่ reject ด้วย Error ที่มีข้อความเสมอ (ไม่มีวันว่าง)
+ */
+function call(action, payload) {
+  return new Promise(function (resolve, reject) {
+    var done = false;
+
+    var timer = setTimeout(function () {
+      if (done) return;
+      done = true;
+      reject(new Error('เซิร์ฟเวอร์ไม่ตอบสนองภายใน ' + Math.round(CALL_TIMEOUT / 1000) +
+        ' วินาที (คำสั่ง: ' + action + ')\nกรุณาตรวจสอบสัญญาณอินเทอร์เน็ตแล้วลองใหม่'));
+    }, CALL_TIMEOUT);
+
+    function finish(fn, arg) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      fn(arg);
+    }
+
+    try {
+      google.script.run
+        .withSuccessHandler(function (res) {
+          if (!res) return finish(reject, new Error('เซิร์ฟเวอร์ไม่ส่งข้อมูลกลับ (คำสั่ง: ' + action + ')'));
+          if (res.ok) return finish(resolve, res.data);
+          var e = new Error(res.error || 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ');
+          e.code = res.code || 'ERROR';
+          e.action = res.action || action;
+          finish(reject, e);
+        })
+        .withFailureHandler(function (err) {
+          var msg = (err && err.message) ? String(err.message) : '';
+          if (!msg) msg = 'ติดต่อเซิร์ฟเวอร์ไม่สำเร็จ (คำสั่ง: ' + action + ')';
+          finish(reject, new Error(msg));
+        })
+        .api(action, payload || {});
+    } catch (err) {
+      finish(reject, new Error('เรียกเซิร์ฟเวอร์ไม่สำเร็จ: ' +
+        ((err && err.message) || 'ไม่ทราบสาเหตุ')));
+    }
+  });
+}
+
+/** เรียกแบบมีแคชระยะสั้น */
+function cachedCall(action, payload, ttl) {
+  var key = action + ':' + JSON.stringify(payload || {});
+  var hit = _cache[key];
+  var now = Date.now();
+  if (hit && (now - hit.at) < (ttl || CACHE_TTL)) return Promise.resolve(hit.value);
+  return call(action, payload).then(function (v) {
+    _cache[key] = { at: now, value: v };
+    return v;
+  });
+}
+
+function clearCache(prefix) {
+  if (!prefix) { _cache = {}; return; }
+  Object.keys(_cache).forEach(function (k) {
+    if (k.indexOf(prefix) === 0) delete _cache[k];
+  });
+}
+
+/* ---------------- ส่วนติดต่อผู้ใช้พื้นฐาน ---------------- */
+
+function $(id) { return document.getElementById(id); }
+
+function el(tag, attrs, children) {
+  var n = document.createElement(tag);
+  Object.keys(attrs || {}).forEach(function (k) {
+    if (k === 'class') n.className = attrs[k];
+    else if (k === 'html') n.innerHTML = attrs[k];
+    else if (k === 'text') n.textContent = attrs[k];
+    else if (k.indexOf('on') === 0 && typeof attrs[k] === 'function') n.addEventListener(k.substring(2), attrs[k]);
+    else if (attrs[k] !== null && attrs[k] !== undefined) n.setAttribute(k, attrs[k]);
+  });
+  (children || []).forEach(function (c) {
+    if (c === null || c === undefined) return;
+    n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+  });
+  return n;
+}
+
+function esc(v) {
+  return String(v === null || v === undefined ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function busy(on) { $('busy').hidden = !on; }
+
+function toast(msg, kind) {
+  var t = el('div', { class: 'toast ' + (kind || ''), text: String(msg || '') });
+  $('toastWrap').appendChild(t);
+  setTimeout(function () {
+    t.style.opacity = '0';
+    setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 250);
+  }, kind === 'err' ? 6000 : 3200);
+}
+
+/** กล่องโต้ตอบ — ข้อความว่างจะถูกแทนด้วยข้อความมาตรฐานเสมอ */
+function modal(opts) {
+  var o = opts || {};
+  $('modalTitle').textContent = o.title || 'แจ้งเตือน';
+
+  var body = $('modalBody');
+  body.innerHTML = '';
+  if (o.node) {
+    body.appendChild(o.node);
+  } else {
+    var text = String(o.text === null || o.text === undefined ? '' : o.text).trim();
+    if (!text) text = 'ไม่มีรายละเอียดเพิ่มเติม';
+    body.appendChild(el('p', { text: text }));
+  }
+
+  var foot = $('modalFoot');
+  foot.innerHTML = '';
+  (o.buttons || [{ label: 'ปิด', kind: 'btn', onClick: closeModal }]).forEach(function (b) {
+    foot.appendChild(el('button', {
+      class: 'btn ' + (b.kind || ''),
+      text: b.label,
+      type: 'button',
+      onclick: function () { if (b.onClick) b.onClick(); else closeModal(); }
+    }));
+  });
+
+  $('modalBackdrop').hidden = false;
+}
+
+function closeModal() { $('modalBackdrop').hidden = true; }
+
+function confirmBox(title, text, onYes, yesLabel) {
+  modal({
+    title: title, text: text,
+    buttons: [
+      { label: 'ยกเลิก', onClick: closeModal },
+      { label: yesLabel || 'ยืนยัน', kind: 'btn-primary', onClick: function () { closeModal(); onYes(); } }
+    ]
+  });
+}
+
+/** แสดงข้อผิดพลาดแบบอ่านรู้เรื่อง */
+function showError(err, title) {
+  var msg = '';
+  if (typeof err === 'string') msg = err;
+  else if (err && err.message) msg = err.message;
+  msg = String(msg || '').trim();
+  if (!msg) {
+    msg = 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ\n\n' +
+      'กรุณาลองใหม่อีกครั้ง หากยังพบปัญหาให้กด "ตรวจสอบระบบ" เพื่อดูว่าข้อมูลส่วนใดยังไม่ครบ';
+  }
+  var buttons = [{ label: 'ปิด', onClick: closeModal }];
+  if (App.boot && App.boot.user && App.boot.user.level >= 2) {
+    buttons.unshift({
+      label: 'ตรวจสอบระบบ', kind: 'btn-ghost',
+      onClick: function () { closeModal(); go('system'); }
+    });
+  }
+  modal({ title: title || 'เกิดข้อผิดพลาด', text: msg, buttons: buttons });
+}
+
+/* ---------------- เครื่องมือจัดรูปแบบ ---------------- */
+
+var THAI_MONTHS_SHORT_JS = ['', 'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+  'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+
+function todayStr() {
+  var d = new Date();
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+}
+function pad(n) { return (n < 10 ? '0' : '') + n; }
+function addDaysStr(ds, n) {
+  var p = String(ds).split('-');
+  var d = new Date(+p[0], +p[1] - 1, +p[2]);
+  d.setDate(d.getDate() + n);
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+}
+function thaiShort(ds) {
+  var p = String(ds || '').split('-');
+  if (p.length !== 3) return ds || '';
+  return (+p[2]) + ' ' + THAI_MONTHS_SHORT_JS[+p[1]] + ' ' + (+p[0] + 543);
+}
+function nf(n) {
+  return (n === null || n === undefined || n === '') ? '-' :
+    String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+function attendClass(a) {
+  if (a === 'PRESENT') return 'ok';
+  if (a === 'LATE' || a === 'PARTIAL') return 'warn';
+  if (a === 'CANCELLED') return 'muted';
+  return 'danger';
+}
+function attendTag(a, label) {
+  var c = { PRESENT: 'tag-ok', LATE: 'tag-warn', PARTIAL: 'tag-warn', CANCELLED: 'tag-muted' }[a] || 'tag-danger';
+  return '<span class="tag ' + c + '">' + esc(label || a) + '</span>';
+}
+function evidenceTag(e, label) {
+  var c = { FULL: 'tag-ok', PARTIAL: 'tag-warn' }[e] || 'tag-danger';
+  var d = { FULL: 'dot-ok', PARTIAL: 'dot-warn' }[e] || 'dot-danger';
+  return '<span class="tag ' + c + '"><span class="dot ' + d + '"></span>' + esc(label || e) + '</span>';
+}
+
+/* ---------------- การนำทาง ---------------- */
+
+function go(view, params) {
+  App.view = view;
+  App.state[view] = Object.assign({}, App.state[view] || {}, params || {});
+  renderNav();
+  closeSidebar();
+  renderView();
+  try { $('content').scrollTop = 0; window.scrollTo(0, 0); } catch (e) { }
+}
+
+function renderNav() {
+  var menu = (App.boot && App.boot.menu) || [];
+  var badges = (App.boot && App.boot.badges) || {};
+
+  function item(m, compact) {
+    var badge = '';
+    if (m.key === 'approve' && badges.pendingSwaps) badge = badges.pendingSwaps;
+    if (m.key === 'report' && badges.openIncidents && compact) badge = '';
+    var n = el('button', {
+      class: 'nav-item' + (App.view === m.key ? ' active' : ''),
+      type: 'button',
+      onclick: function () { go(m.key); }
+    });
+    n.innerHTML = '<span class="ico">' + m.icon + '</span><span>' + esc(m.label) + '</span>' +
+      (badge ? '<span class="nav-badge">' + badge + '</span>' : '');
+    return n;
+  }
+
+  var sb = $('sidebar');
+  sb.innerHTML = '';
+  sb.appendChild(el('div', { class: 'nav-group', text: 'หลัก' }));
+  menu.forEach(function (m) { sb.appendChild(item(m, false)); });
+
+  var bb = $('bottombar');
+  bb.innerHTML = '';
+  menu.slice(0, 5).forEach(function (m) { bb.appendChild(item(m, true)); });
+}
+
+function closeSidebar() { $('sidebar').classList.remove('open'); }
+
+function renderView() {
+  var content = $('content');
+  var fn = VIEWS[App.view];
+  if (!fn) {
+    content.innerHTML = '<div class="empty"><div class="empty-icon">🧭</div>' +
+      '<div class="empty-title">ไม่พบหน้านี้</div>' +
+      '<div>กรุณาเลือกเมนูทางด้านซ้าย</div></div>';
+    return;
+  }
+  content.innerHTML = '<div class="empty"><div class="boot-spinner"></div>' +
+    '<div class="mt8 muted">กำลังโหลดข้อมูล…</div></div>';
+  Promise.resolve()
+    .then(function () { return fn(content, App.state[App.view] || {}); })
+    .catch(function (err) {
+      content.innerHTML = '';
+      content.appendChild(errorPanel(err));
+    });
+}
+
+function errorPanel(err) {
+  var msg = (err && err.message) ? err.message : String(err || '');
+  if (!msg.trim()) msg = 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+  var box = el('div', { class: 'card' });
+  box.innerHTML =
+    '<div class="card-head"><div class="card-title" style="color:var(--danger)">โหลดข้อมูลไม่สำเร็จ</div></div>' +
+    '<div class="card-body"><div class="alert alert-DANGER" style="white-space:pre-wrap">' + esc(msg) + '</div>' +
+    '<div class="flex mt8">' +
+    '<button class="btn btn-primary" type="button" id="errRetry">ลองใหม่</button>' +
+    '<button class="btn" type="button" id="errDiag">ตรวจสอบระบบ</button>' +
+    '</div></div>';
+  setTimeout(function () {
+    var r = document.getElementById('errRetry');
+    if (r) r.onclick = function () { clearCache(); renderView(); };
+    var d = document.getElementById('errDiag');
+    if (d) d.onclick = function () { go('system'); };
+  }, 0);
+  return box;
+}
+
+/* ---------------- การเริ่มระบบ ---------------- */
+
+function bootStep(text) {
+  var n = $('bootStep');
+  if (n) n.textContent = text;
+}
+
+function bootError(message, detail) {
+  var spinner = $('bootSpinner');
+  if (spinner) spinner.style.display = 'none';
+  bootStep('');
+  var box = $('bootError');
+  if (!box) return;
+  box.hidden = false;
+  var msg = String(message || '').trim() || 'เริ่มระบบไม่สำเร็จโดยไม่ทราบสาเหตุ';
+  $('bootErrorMsg').textContent = msg;
+  if (detail) {
+    $('bootErrorDetail').hidden = false;
+    $('bootErrorDetail').textContent = String(detail);
+  }
+}
+
+function applyBrand(brand) {
+  if (!brand) return;
+  var root = document.documentElement.style;
+  if (brand.primary) root.setProperty('--primary', brand.primary);
+  if (brand.dark) root.setProperty('--dark', brand.dark);
+  if (brand.accent) root.setProperty('--accent', brand.accent);
+  var school = $('brandSchool');
+  if (school && brand.schoolName) school.textContent = brand.schoolName;
+  if (brand.logoUrl) {
+    var logo = $('brandLogo');
+    if (logo) { logo.style.backgroundImage = 'url(' + brand.logoUrl + ')'; logo.textContent = ''; }
+  }
+}
+
+function startApp() {
+  bootStep('กำลังยืนยันตัวตน…');
+
+  return call('bootstrap')
+    .then(function (data) {
+      applyBrand(data.brand);
+
+      if (!data.authorized) {
+        var extra = '';
+        if (data.reasonCode === 'NOT_REGISTERED') {
+          extra = '\n\nวิธีแก้: แจ้งผู้ดูแลระบบให้เพิ่มอีเมลนี้ในเมนู ข้อมูลหลัก > ครู';
+        } else if (data.reasonCode === 'WRONG_DOMAIN') {
+          extra = '\n\nวิธีแก้: ออกจากระบบ Google แล้วเข้าใหม่ด้วยบัญชีของโรงเรียน ' +
+            'หรือเปิดลิงก์ในหน้าต่างไม่ระบุตัวตน';
+        } else if (data.reasonCode === 'NO_EMAIL') {
+          extra = '\n\nวิธีแก้: ผู้ดูแลระบบต้องตั้งค่าการ Deploy เป็น Execute as "Me" ' +
+            'และ Who has access เป็นผู้ใช้ในโดเมนของโรงเรียน';
+        }
+        bootError((data.reason || 'ไม่สามารถเข้าสู่ระบบได้') + extra);
+
+        if (data.canClaimAdmin) {
+          var b = $('bootDiagBtn');
+          if (b) {
+            b.textContent = 'ตั้งบัญชีนี้เป็นผู้ดูแลระบบ';
+            b.onclick = function () {
+              busy(true);
+              call('setup.claimAdmin', {})
+                .then(function () { location.reload(); })
+                .catch(function (e) { busy(false); alert(e.message); });
+            };
+          }
+        }
+        return null;
+      }
+
+      App.boot = data;
+      App.ready = true;
+
+      $('userName').textContent = data.user.name;
+      $('userRole').textContent = data.user.roleName;
+
+      bootStep('พร้อมใช้งาน');
+      $('boot').hidden = true;
+      $('app').hidden = false;
+
+      renderNav();
+      go(data.setup && !data.setup.ready && data.user.level >= 3 ? 'settings' : 'today');
+      return data;
+    })
+    .catch(function (err) {
+      bootError((err && err.message) || 'เริ่มระบบไม่สำเร็จ', err && err.stack);
+    });
+}
+
+/* ---------------- ตัวจัดการเหตุการณ์ระดับหน้าต่าง ---------------- */
+
+window.addEventListener('error', function (e) {
+  if (!App.ready) {
+    bootError('เกิดข้อผิดพลาดขณะเริ่มระบบ: ' + (e.message || 'ไม่ทราบสาเหตุ'),
+      e.filename ? (e.filename + ':' + e.lineno) : '');
+  }
+});
+
+window.addEventListener('unhandledrejection', function (e) {
+  var reason = e && e.reason;
+  var msg = (reason && reason.message) ? reason.message : String(reason || '');
+  if (!App.ready) bootError('เกิดข้อผิดพลาดขณะเริ่มระบบ: ' + (msg || 'ไม่ทราบสาเหตุ'));
+  else if (msg) toast(msg, 'err');
+});
+
+/* ---------------- ผูกปุ่มพื้นฐาน ---------------- */
+
+function bindShell() {
+  var t = $('navToggle');
+  if (t) t.onclick = function () { $('sidebar').classList.toggle('open'); };
+
+  var r = $('refreshBtn');
+  if (r) r.onclick = function () {
+    clearCache();
+    toast('กำลังโหลดข้อมูลใหม่');
+    renderView();
+  };
+
+  var mc = $('modalClose');
+  if (mc) mc.onclick = closeModal;
+
+  var mb = $('modalBackdrop');
+  if (mb) mb.addEventListener('click', function (e) { if (e.target === mb) closeModal(); });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeModal();
+  });
+
+  var bd = $('bootDiagBtn');
+  if (bd) bd.onclick = function () {
+    busy(true);
+    call('ping')
+      .then(function (p) {
+        busy(false);
+        alert('เชื่อมต่อเซิร์ฟเวอร์ได้ (เวอร์ชัน ' + p.version + ')\n' +
+          'ปัญหาน่าจะอยู่ที่สิทธิ์การเข้าถึงหรือข้อมูลผู้ใช้');
+      })
+      .catch(function (e) {
+        busy(false);
+        alert('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้: ' + e.message);
+      });
+  };
+}
+
+/* ---------------- จุดเริ่มต้น (กันหน้าค้าง) ---------------- */
+
+(function startCwkDutyFlow() {
+  var started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    try {
+      bindShell();
+      startApp();
+    } catch (err) {
+      bootError('เริ่มระบบไม่สำเร็จ: ' + ((err && err.message) || 'ไม่ทราบสาเหตุ'),
+        err && err.stack);
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+    setTimeout(start, 3000);      // กันกรณีเหตุการณ์ถูกยิงไปก่อนแล้ว
+  } else {
+    start();
+  }
+})();
+</script>

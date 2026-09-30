@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5">
+  <title>CWK DutyFlow</title>
+  <?!= include('Styles'); ?>
+</head>
+<body>
+
+  <!-- หน้าจอระหว่างเริ่มระบบ -->
+  <div id="boot" class="boot">
+    <div class="boot-card">
+      <div class="boot-logo">จ.ว.</div>
+      <div class="boot-title">CWK DutyFlow</div>
+      <div class="boot-sub">ระบบบริหารเวรประจำวัน</div>
+      <div class="boot-spinner" id="bootSpinner"></div>
+      <div class="boot-step" id="bootStep">กำลังเริ่มระบบ…</div>
+      <div class="boot-error" id="bootError" hidden>
+        <div class="boot-error-title" id="bootErrorTitle">เริ่มระบบไม่สำเร็จ</div>
+        <div class="boot-error-msg" id="bootErrorMsg"></div>
+        <pre class="boot-error-detail" id="bootErrorDetail" hidden></pre>
+        <div class="boot-error-actions">
+          <button class="btn btn-primary" onclick="location.reload()">ลองใหม่</button>
+          <button class="btn btn-ghost" id="bootDiagBtn" type="button">ตรวจสอบระบบ</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- โครงหน้าจอหลัก -->
+  <div id="app" class="app" hidden>
+
+    <header class="topbar">
+      <button class="icon-btn only-mobile" id="navToggle" type="button" aria-label="เมนู">☰</button>
+      <div class="brand">
+        <div class="brand-logo" id="brandLogo">จ.ว.</div>
+        <div class="brand-text">
+          <div class="brand-name">CWK DutyFlow</div>
+          <div class="brand-school" id="brandSchool">โรงเรียนจุนวิทยาคม</div>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <button class="icon-btn" id="refreshBtn" type="button" title="โหลดข้อมูลใหม่">↻</button>
+        <div class="user-chip" id="userChip">
+          <div class="user-name" id="userName"></div>
+          <div class="user-role" id="userRole"></div>
+        </div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav class="sidebar" id="sidebar"></nav>
+      <main class="content" id="content"></main>
+    </div>
+
+    <div class="bottombar only-mobile" id="bottombar"></div>
+  </div>
+
+  <!-- กล่องโต้ตอบ -->
+  <div class="modal-backdrop" id="modalBackdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <div class="modal-title" id="modalTitle">แจ้งเตือน</div>
+        <button class="icon-btn" id="modalClose" type="button" aria-label="ปิด">✕</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+      <div class="modal-foot" id="modalFoot"></div>
+    </div>
+  </div>
+
+  <div class="toast-wrap" id="toastWrap"></div>
+  <div class="busy" id="busy" hidden><div class="busy-spinner"></div></div>
+
+  <?!= include('Views'); ?>
+  <?!= include('Actions'); ?>
+  <?!= include('Scripts'); ?>
+</body>
+</html>

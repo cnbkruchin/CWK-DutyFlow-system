@@ -1,0 +1,1153 @@
+<script>
+/* =================================================================
+ * Actions.html — การกระทำทั้งหมดของผู้ใช้
+ * ================================================================= */
+
+/* ---------- ฟอร์มในกล่องโต้ตอบ ---------- */
+
+/**
+ * fields: [{key,label,type,value,options,required,hint,min,max,placeholder}]
+ * onSubmit(values) -> Promise
+ */
+function formModal(title, fields, onSubmit, submitLabel) {
+  var wrap = el('div', {});
+  var html = '<div class="form-row">';
+  fields.forEach(function (f) {
+    var id = 'f_' + f.key;
+    html += '<div class="field" style="' + (f.wide ? 'grid-column:1/-1' : '') + '">' +
+      '<label>' + esc(f.label) + (f.required ? ' <span style="color:var(--danger)">*</span>' : '') + '</label>';
+    if (f.type === 'select') {
+      html += '<select class="input" id="' + id + '">' + (f.options || []).map(function (o) {
+        var v = (o.value !== undefined) ? o.value : o;
+        var l = (o.label !== undefined) ? o.label : o;
+        return '<option value="' + esc(v) + '"' + (String(v) === String(f.value) ? ' selected' : '') + '>' +
+          esc(l) + '</option>';
+      }).join('') + '</select>';
+    } else if (f.type === 'textarea') {
+      html += '<textarea class="input" id="' + id + '" placeholder="' + esc(f.placeholder || '') + '">' +
+        esc(f.value || '') + '</textarea>';
+    } else {
+      html += '<input class="input" id="' + id + '" type="' + (f.type || 'text') + '"' +
+        (f.min !== undefined ? ' min="' + f.min + '"' : '') +
+        (f.max !== undefined ? ' max="' + f.max + '"' : '') +
+        (f.step !== undefined ? ' step="' + f.step + '"' : '') +
+        ' value="' + esc(f.value === null || f.value === undefined ? '' : f.value) + '"' +
+        ' placeholder="' + esc(f.placeholder || '') + '">';
+    }
+    if (f.hint) html += '<div class="hint">' + esc(f.hint) + '</div>';
+    html += '</div>';
+  });
+  wrap.innerHTML = html + '</div><div id="formErr"></div>';
+
+  modal({
+    title: title,
+    node: wrap,
+    buttons: [
+      { label: 'ยกเลิก', onClick: closeModal },
+      {
+        label: submitLabel || 'บันทึก', kind: 'btn-primary',
+        onClick: function () {
+          var values = {};
+          var missing = [];
+          fields.forEach(function (f) {
+            var n = document.getElementById('f_' + f.key);
+            var v = n ? n.value : '';
+            values[f.key] = v;
+            if (f.required && !String(v).trim()) missing.push(f.label);
+          });
+          if (missing.length) {
+            document.getElementById('formErr').innerHTML =
+              '<div class="alert alert-DANGER">กรุณากรอก: ' + esc(missing.join(', ')) + '</div>';
+            return;
+          }
+          busy(true);
+          Promise.resolve(onSubmit(values))
+            .then(function () {
+              busy(false); closeModal(); clearCache();
+              toast('บันทึกเรียบร้อย', 'ok');
+              renderView();
+            })
+            .catch(function (e) { busy(false); showError(e, 'บันทึกไม่สำเร็จ'); });
+        }
+      }
+    ]
+  });
+}
+
+function reasonPrompt(title, label, onOk, okLabel) {
+  formModal(title, [{ key: 'reason', label: label, type: 'textarea', required: true, wide: true,
+    hint: 'อย่างน้อย 5 ตัวอักษร — ข้อความนี้จะถูกบันทึกในรายงานและประวัติการใช้งาน' }],
+    function (v) { return onOk(v.reason); }, okLabel || 'ยืนยัน');
+}
+
+/* ---------- GPS และภาพ ---------- */
+
+function getGeo() {
+  return new Promise(function (resolve) {
+    if (!navigator.geolocation) return resolve({ lat: null, lng: null, accuracy: 0 });
+    var done = false;
+    var t = setTimeout(function () {
+      if (!done) { done = true; resolve({ lat: null, lng: null, accuracy: 0 }); }
+    }, 12000);
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      if (done) return;
+      done = true; clearTimeout(t);
+      resolve({
+        lat: pos.coords.latitude, lng: pos.coords.longitude,
+        accuracy: Math.round(pos.coords.accuracy || 0)
+      });
+    }, function () {
+      if (done) return;
+      done = true; clearTimeout(t);
+      resolve({ lat: null, lng: null, accuracy: 0 });
+    }, { enableHighAccuracy: true, timeout: 11000, maximumAge: 0 });
+  });
+}
+
+/** ย่อภาพฝั่งเบราว์เซอร์ก่อนอัปโหลด เพื่อความเร็ว */
+function compressImage(file, maxSide, quality) {
+  return new Promise(function (resolve, reject) {
+    var reader = new FileReader();
+    reader.onerror = function () { reject(new Error('อ่านไฟล์ภาพไม่สำเร็จ')); };
+    reader.onload = function () {
+      var img = new Image();
+      img.onerror = function () { reject(new Error('ไฟล์นี้ไม่ใช่ภาพที่รองรับ')); };
+      img.onload = function () {
+        var m = maxSide || 1280;
+        var w = img.width, h = img.height;
+        if (w > h && w > m) { h = Math.round(h * m / w); w = m; }
+        else if (h >= w && h > m) { w = Math.round(w * m / h); h = m; }
+        var c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve({ data: c.toDataURL('image/jpeg', quality || 0.72), mimeType: 'image/jpeg' });
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function pickPhotos(multiple) {
+  return new Promise(function (resolve) {
+    var input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.capture = 'environment';
+    if (multiple) input.multiple = true;
+    input.onchange = function () {
+      var files = Array.prototype.slice.call(input.files || []).slice(0, 3);
+      if (!files.length) return resolve([]);
+      Promise.all(files.map(function (f) { return compressImage(f); })).then(resolve);
+    };
+    input.click();
+  });
+}
+
+/* ---------- ตั้งค่าเริ่มต้น ---------- */
+
+function bindSetupButtons(scope) {
+  var b = (scope || document).querySelector('#seedSample');
+  if (!b) return;
+  b.onclick = function () {
+    confirmBox('ใส่ข้อมูลตัวอย่าง',
+      'ระบบจะสร้างช่วงเวลา 3 ช่วง จุดเวร 5 จุด และภาคเรียนปัจจุบัน ' +
+      '(จะไม่ทับข้อมูลที่มีอยู่แล้ว) ต้องการดำเนินการหรือไม่',
+      function () {
+        busy(true);
+        call('setup.seedSample', {})
+          .then(function (r) {
+            busy(false); clearCache();
+            toast('เพิ่มช่วงเวลา ' + r.slots + ' · จุดเวร ' + r.points + ' · ภาคเรียน ' + r.semester, 'ok');
+            return call('bootstrap').then(function (d) { App.boot = d; renderNav(); renderView(); });
+          })
+          .catch(function (e) { busy(false); showError(e); });
+      });
+  };
+}
+
+/* ---------- หน้าวันนี้ ---------- */
+
+function bindDutyCards(root, d) {
+  root.querySelectorAll('img[data-photo]').forEach(function (img) {
+    img.onclick = function () {
+      modal({
+        title: 'ภาพหลักฐาน',
+        node: el('div', { html: '<img src="' + esc(img.getAttribute('data-photo')) +
+          '" style="width:100%;border-radius:10px">' })
+      });
+    };
+  });
+
+  root.querySelectorAll('[data-act="adjust"]').forEach(function (b) {
+    b.onclick = function () { openAdjust(b.getAttribute('data-id')); };
+  });
+  root.querySelectorAll('[data-act="swap"]').forEach(function (b) {
+    b.onclick = function () { openDailySwap(b.getAttribute('data-id'), d); };
+  });
+}
+
+function openAdjust(scheduleId) {
+  busy(true);
+  call('schedule.candidates', { scheduleId: scheduleId })
+    .then(function (c) {
+      busy(false);
+      var opts = [{ value: '', label: '— เลือกครู —' }]
+        .concat(c.free.map(function (t) {
+          return { value: t.id, label: t.name + (t.department ? ' · ' + t.department : '') };
+        }))
+        .concat(c.occupied.map(function (t) {
+          return { value: t.id, label: '(ติดเวรที่ ' + t.busyAt + ') ' + t.name };
+        }));
+
+      formModal('เปลี่ยนครูเวร — ' + c.pointName,
+        [
+          { key: 'info', label: 'ข้อมูลเวร', type: 'text', value: c.dateThai + ' · ครูปัจจุบัน ' + c.currentTeacherName, wide: true },
+          { key: 'teacherId', label: 'ครูที่จะอยู่แทน', type: 'select', options: opts, required: true, wide: true,
+            hint: 'ครูที่ติดเวรอื่นในช่วงเวลาเดียวกันจะถูกปฏิเสธเมื่อบันทึก' },
+          { key: 'reason', label: 'เหตุผล', type: 'textarea', required: true, wide: true,
+            hint: 'อย่างน้อย 5 ตัวอักษร · จะถูกบันทึกเป็นหลักฐานการอนุมัติโดยท่าน' }
+        ],
+        function (v) {
+          return call('schedule.adjust', {
+            scheduleId: scheduleId, teacherId: v.teacherId, reason: v.reason
+          });
+        }, 'บันทึกการเปลี่ยน');
+
+      var infoField = document.getElementById('f_info');
+      if (infoField) { infoField.readOnly = true; infoField.style.background = '#F3F4F6'; }
+    })
+    .catch(function (e) { busy(false); showError(e); });
+}
+
+function openDailySwap(scheduleId, d) {
+  var others = (d.rows || []).filter(function (r) { return r.id !== scheduleId; });
+  if (!others.length) {
+    return modal({ title: 'สลับจุด', text: 'ไม่มีที่นั่งอื่นในวันนี้ให้สลับ' });
+  }
+  var opts = [{ value: '', label: '— เลือกที่นั่งที่จะสลับ —' }].concat(others.map(function (r) {
+    return {
+      value: r.id,
+      label: r.pointName + ' · ' + r.slotName + ' · ' + (r.effectiveTeacherName || '(ว่าง)')
+    };
+  }));
+
+  formModal('สลับครูระหว่างสองจุด',
+    [
+      { key: 'b', label: 'สลับกับ', type: 'select', options: opts, required: true, wide: true },
+      { key: 'reason', label: 'เหตุผล', type: 'textarea', required: true, wide: true }
+    ],
+    function (v) {
+      return call('schedule.swap', { a: scheduleId, b: v.b, reason: v.reason });
+    }, 'สลับ');
+}
+
+/* ---------- เวรของฉัน ---------- */
+
+function bindMineActions(root) {
+  root.querySelectorAll('[data-act]').forEach(function (b) {
+    var act = b.getAttribute('data-act');
+    var id = b.getAttribute('data-id');
+    if (act === 'checkin') b.onclick = function () { doCheckin(id, 'CHECK_IN'); };
+    if (act === 'checkout') b.onclick = function () { doCheckin(id, 'CHECK_OUT'); };
+    if (act === 'addphoto') b.onclick = function () { doAddPhoto(id); };
+    if (act === 'askswap') b.onclick = function () { openAskSwap(id); };
+    if (act === 'incident') b.onclick = function () { openIncident(id); };
+  });
+}
+
+function doCheckin(scheduleId, action) {
+  busy(true);
+  call('checkin.context', { scheduleId: scheduleId })
+    .then(function (c) {
+      busy(false);
+      if (!c.canCheckIn) return modal({ title: 'ยังบันทึกไม่ได้', text: c.windowReason });
+
+      var body = el('div', {});
+      body.innerHTML =
+        '<div class="alert alert-INFO"><div><b>' + esc(c.pointName) + '</b><br>' +
+        esc(c.dateThai) + ' · ' + esc(c.slotName) + ' ' + esc(c.startTime) + '–' + esc(c.endTime) + '</div></div>' +
+        '<div id="ckGeo" class="small muted">กำลังอ่านพิกัด…</div>' +
+        '<div class="field mt8"><label>ภาพหลักฐาน' +
+        (c.photoRequired && action === 'CHECK_IN' ? ' <span style="color:var(--danger)">*</span>' : '') +
+        '</label><button class="btn btn-block" type="button" id="ckPhoto">📷 ถ่ายภาพ / เลือกภาพ</button>' +
+        '<div class="thumbs" id="ckThumbs"></div>' +
+        '<div class="hint">' + (c.photoRequired ? 'ต้องมีอย่างน้อย ' + c.minPhotos + ' ภาพ' : 'ไม่บังคับ') + '</div></div>' +
+        '<div class="field"><label>หมายเหตุ</label><textarea class="input" id="ckNote" placeholder="ไม่บังคับ"></textarea></div>';
+
+      var photos = [];
+      var geo = { lat: null, lng: null, accuracy: 0 };
+
+      modal({
+        title: action === 'CHECK_IN' ? 'เช็คอินเข้าเวร' : 'เช็คเอาต์ออกเวร',
+        node: body,
+        buttons: [
+          { label: 'ยกเลิก', onClick: closeModal },
+          {
+            label: action === 'CHECK_IN' ? 'บันทึกเข้าเวร' : 'บันทึกออกเวร', kind: 'btn-primary',
+            onClick: function () {
+              if (action === 'CHECK_IN' && c.photoRequired && photos.length < c.minPhotos) {
+                return toast('กรุณาแนบภาพหลักฐานอย่างน้อย ' + c.minPhotos + ' ภาพ', 'err');
+              }
+              busy(true);
+              call('checkin.submit', {
+                scheduleId: scheduleId, action: action,
+                lat: geo.lat, lng: geo.lng, accuracy: geo.accuracy,
+                note: document.getElementById('ckNote').value,
+                device: navigator.userAgent.substring(0, 110),
+                idempotencyKey: scheduleId + '|' + action + '|' + Date.now(),
+                photos: photos
+              })
+                .then(function (r) {
+                  busy(false); closeModal(); clearCache();
+                  toast(r.message + ' (' + r.time + ')', 'ok');
+                  renderView();
+                })
+                .catch(function (e) { busy(false); showError(e, 'บันทึกไม่สำเร็จ'); });
+            }
+          }
+        ]
+      });
+
+      getGeo().then(function (g) {
+        geo = g;
+        var n = document.getElementById('ckGeo');
+        if (!n) return;
+        if (g.lat === null) {
+          n.innerHTML = c.gpsRequired
+            ? '<span class="tag tag-warn">ไม่ได้รับพิกัด — ระบบจะบันทึกว่าไม่มีข้อมูล GPS</span>'
+            : '<span class="tag tag-muted">ไม่ใช้ GPS</span>';
+          return;
+        }
+        var dist = Math.round(haversineJs(c.pointLat, c.pointLng, g.lat, g.lng));
+        var inRange = dist <= c.pointRadius;
+        n.innerHTML = '<span class="tag ' + (inRange ? 'tag-ok' : 'tag-warn') + '">📍 ห่างจากจุด ' +
+          nf(dist) + ' ม. (รัศมี ' + c.pointRadius + ' ม.)</span>' +
+          ' <span class="muted small">ความแม่นยำ ±' + g.accuracy + ' ม.</span>';
+      });
+
+      document.getElementById('ckPhoto').onclick = function () {
+        pickPhotos(true).then(function (list) {
+          list.forEach(function (p) { if (photos.length < 3) photos.push(p); });
+          var t = document.getElementById('ckThumbs');
+          t.innerHTML = photos.map(function (p) {
+            return '<img src="' + p.data + '" alt="ภาพ">';
+          }).join('');
+        }).catch(function (e) { toast(e.message, 'err'); });
+      };
+    })
+    .catch(function (e) { busy(false); showError(e); });
+}
+
+function haversineJs(lat1, lng1, lat2, lng2) {
+  var R = 6371000, rad = function (x) { return x * Math.PI / 180; };
+  var dLat = rad(lat2 - lat1), dLng = rad(lng2 - lng1);
+  var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function doAddPhoto(scheduleId) {
+  pickPhotos(false).then(function (list) {
+    if (!list.length) return;
+    busy(true);
+    call('checkin.addPhoto', { scheduleId: scheduleId, photo: list[0] })
+      .then(function () {
+        busy(false); clearCache(); toast('เพิ่มภาพหลักฐานเรียบร้อย', 'ok'); renderView();
+      })
+      .catch(function (e) { busy(false); showError(e); });
+  }).catch(function (e) { toast(e.message, 'err'); });
+}
+
+function openAskSwap(scheduleId) {
+  busy(true);
+  cachedCall('teacher.options', {})
+    .then(function (teachers) {
+      busy(false);
+      var opts = [{ value: '', label: '— เลือกครู —' }].concat(teachers.map(function (t) {
+        return { value: t.id, label: t.name + (t.department ? ' · ' + t.department : '') };
+      }));
+      formModal('ขอเปลี่ยนเวร',
+        [
+          { key: 'type', label: 'ประเภทคำขอ', type: 'select', required: true, wide: true,
+            options: [{ value: 'SUBSTITUTE', label: 'ขอให้ครูท่านอื่นอยู่แทน' },
+                      { value: 'EXCHANGE', label: 'ขอสลับเวรกัน' }] },
+          { key: 'toTeacherId', label: 'ครูที่ต้องการ', type: 'select', options: opts, required: true, wide: true },
+          { key: 'counterScheduleId', label: 'เวรของอีกฝ่ายที่จะสลับ (เฉพาะกรณีสลับเวร)', type: 'text', wide: true,
+            hint: 'เว้นว่างไว้หากเลือก "ขอให้อยู่แทน" — ระบบจะช่วยตรวจสอบให้' },
+          { key: 'reason', label: 'เหตุผล', type: 'textarea', required: true, wide: true }
+        ],
+        function (v) {
+          return call('swap.create', {
+            type: v.type, scheduleId: scheduleId, toTeacherId: v.toTeacherId,
+            counterScheduleId: v.counterScheduleId, reason: v.reason
+          });
+        }, 'ส่งคำขอ');
+    })
+    .catch(function (e) { busy(false); showError(e); });
+}
+
+function openIncident(scheduleId) {
+  busy(true);
+  cachedCall('incident.options', {})
+    .then(function (o) {
+      busy(false);
+      formModal('แจ้งเหตุการณ์ระหว่างอยู่เวร',
+        [
+          { key: 'category', label: 'ประเภท', type: 'select', options: o.categories, required: true },
+          { key: 'severity', label: 'ระดับความรุนแรง', type: 'select', options: o.severities, required: true },
+          { key: 'title', label: 'หัวข้อ', required: true, wide: true, hint: 'อย่างน้อย 5 ตัวอักษร' },
+          { key: 'detail', label: 'รายละเอียด', type: 'textarea', required: true, wide: true, hint: 'อย่างน้อย 10 ตัวอักษร' }
+        ],
+        function (v) {
+          return call('incident.create', {
+            scheduleId: scheduleId, category: v.category, severity: v.severity,
+            title: v.title, detail: v.detail
+          });
+        }, 'ส่งรายงาน');
+    })
+    .catch(function (e) { busy(false); showError(e); });
+}
+
+/* ---------- จัดเวร ---------- */
+
+function assignFields(d, row) {
+  var teachers = App.state._teachers || [];
+  return [
+    { key: 'weekday', label: 'วัน', type: 'select', required: true,
+      value: row ? row.weekday : 1,
+      options: d.weekdays.map(function (w) { return { value: w.value, label: w.label }; }) },
+    { key: 'slotId', label: 'ช่วงเวลา', type: 'select', required: true,
+      value: row ? row.slotId : '',
+      options: d.slots.map(function (s) { return { value: s.id, label: s.name }; }) },
+    { key: 'pointId', label: 'จุดเวร', type: 'select', required: true,
+      value: row ? row.pointId : '',
+      options: d.points.map(function (p) { return { value: p.id, label: p.name + ' (' + p.seatCount + ' ที่นั่ง)' }; }) },
+    { key: 'seatNo', label: 'ที่นั่งลำดับที่', type: 'number', required: true, min: 1, max: 20,
+      value: row ? row.seatNo : 1 },
+    { key: 'teacherId', label: 'ครู', type: 'select', required: true,
+      value: row ? row.teacherId : '', wide: true,
+      options: [{ value: '', label: '— เลือกครู —' }].concat(teachers.map(function (t) {
+        return { value: t.id, label: t.name + (t.department ? ' · ' + t.department : '') };
+      })) },
+    { key: 'rotationGroup', label: 'กลุ่มการหมุนจุด', value: row ? row.rotationGroup : '',
+      hint: 'ครูจะหมุนสลับจุดเฉพาะภายในกลุ่มเดียวกัน เว้นว่างเพื่อใช้ค่าของจุดเวร' },
+    { key: 'rotationOrder', label: 'ลำดับในวงหมุน', type: 'number', min: 1, max: 999,
+      value: row ? row.rotationOrder : 1 },
+    { key: 'rotationScope', label: 'ขอบเขตการหมุน', type: 'select', wide: true,
+      value: row ? row.rotationScope : 'BOTH',
+      options: [
+        { value: 'BOTH', label: 'หมุนทั้งวันและจุด' },
+        { value: 'DAY_ONLY', label: 'หมุนเฉพาะวัน' },
+        { value: 'POINT_ONLY', label: 'หมุนเฉพาะจุด' },
+        { value: 'NONE', label: 'ไม่หมุน' },
+        { value: 'LOCKED', label: 'ล็อกถาวร' }
+      ] }
+  ];
+}
+
+function bindAssignBoard(body, d) {
+  var add = document.getElementById('addAssign');
+  if (add) add.onclick = function () {
+    formModal('เพิ่มที่นั่งเวร', assignFields(d, null), function (v) {
+      return call('assign.save', v);
+    });
+  };
+
+  body.querySelectorAll('[data-act="editAssign"]').forEach(function (b) {
+    b.onclick = function () {
+      var id = b.getAttribute('data-id');
+      var row = d.rows.filter(function (r) { return r.id === id; })[0];
+      if (!row) return;
+      formModal('แก้ไขที่นั่งเวร', assignFields(d, row), function (v) {
+        v.id = id;
+        return call('assign.save', v);
+      });
+    };
+  });
+
+  body.querySelectorAll('[data-act="delAssign"]').forEach(function (b) {
+    b.onclick = function () {
+      confirmBox('ลบที่นั่งเวร', 'ต้องการนำที่นั่งนี้ออกจากแม่แบบใช่หรือไม่ ' +
+        '(ข้อมูลเดิมจะถูกเก็บไว้ในระบบ ไม่ถูกลบถาวร)', function () {
+          busy(true);
+          call('assign.remove', { id: b.getAttribute('data-id') })
+            .then(function () { busy(false); clearCache(); toast('นำออกแล้ว', 'ok'); renderView(); })
+            .catch(function (e) { busy(false); showError(e); });
+        }, 'นำออก');
+    };
+  });
+}
+
+function bindPinActions(body, d) {
+  body.querySelectorAll('[data-act="pin"]').forEach(function (b) {
+    b.onclick = function () {
+      var id = b.getAttribute('data-id');
+      var row = d.rows.filter(function (r) { return r.id === id; })[0];
+      formModal('ปักหมุดจุดเฉพาะบุคคล',
+        [
+          { key: 'info', label: 'ที่นั่ง', value: row ? (row.weekdayName + ' · ' + row.slotName + ' · ' +
+            row.pointName + ' ที่ ' + row.seatNo + ' · ' + row.teacherName) : '', wide: true },
+          { key: 'pinMode', label: 'โหมดปักหมุด', type: 'select', required: true, wide: true,
+            value: row ? row.pinMode : 'NONE',
+            options: d.pinOptions },
+          { key: 'reason', label: 'เหตุผล', type: 'textarea', wide: true,
+            value: row ? row.pinReason : '',
+            hint: 'บังคับกรอกเมื่อปักหมุด (อย่างน้อย 5 ตัวอักษร) เช่น "ดูแลจุดจราจรหน้าโรงเรียนประจำ"' }
+        ],
+        function (v) {
+          return call('pin.set', { id: id, pinMode: v.pinMode, reason: v.reason });
+        }, 'บันทึก');
+      var info = document.getElementById('f_info');
+      if (info) { info.readOnly = true; info.style.background = '#F3F4F6'; }
+    };
+  });
+}
+
+function bindRotation(body, s) {
+  var save = document.getElementById('rSave');
+  if (save) save.onclick = function () {
+    busy(true);
+    call('rotation.saveSettings', {
+      mode: $('rMode').value,
+      nDays: $('rDays').value,
+      step: $('rStep').value,
+      respectPin: $('rPin').value === '1',
+      dayRotationEnabled: $('rDayOn').value === '1',
+      dayRotationShift: $('rDayShift').value
+    })
+      .then(function () { busy(false); clearCache(); toast('บันทึกการตั้งค่าเรียบร้อย', 'ok'); renderView(); })
+      .catch(function (e) { busy(false); showError(e); });
+  };
+
+  var pv = document.getElementById('rPreview');
+  if (pv) pv.onclick = function () {
+    busy(true);
+    call('rotation.pointPreview', { weeks: 4 })
+      .then(function (d) {
+        busy(false);
+        var html = '<div class="card"><div class="card-head"><div>' +
+          '<div class="card-title">พรีวิวการหมุนจุด</div>' +
+          '<div class="card-sub">โหมด: ' + esc(d.modeLabel) +
+          ' · เคารพการปักหมุด: ' + (d.respectPin ? 'ใช่' : 'ไม่') + '</div></div></div><div class="card-body">';
+        if (!d.days.length) {
+          html += emptyState('🔄', 'ไม่มีข้อมูลให้พรีวิว', 'ตรวจสอบว่ามีการจัดเวรและภาคเรียนที่ใช้งานแล้ว');
+        } else {
+          d.days.forEach(function (day) {
+            var changed = day.rows.filter(function (r) { return r.changed; }).length;
+            html += '<div class="mt16"><b>' + esc(day.dateThai) + '</b> ' +
+              '<span class="muted small">(offset ' + day.offset + ' · เปลี่ยน ' + changed + ' ที่นั่ง)</span>' +
+              '<div class="table-wrap"><table class="tb"><thead><tr><th>จุด</th><th>ช่วงเวลา</th>' +
+              '<th>เดิม</th><th>หลังหมุน</th><th></th></tr></thead><tbody>';
+            day.rows.forEach(function (r) {
+              html += '<tr><td>' + esc(r.pointName) + '</td><td class="small">' + esc(r.slotName) + '</td>' +
+                '<td class="small muted">' + esc(r.beforeName || '-') + '</td>' +
+                '<td>' + (r.changed ? '<b>' + esc(r.afterName || '-') + '</b>' : esc(r.afterName || '-')) + '</td>' +
+                '<td>' + (r.pinned ? '<span class="tag tag-info">📌 ปักหมุด</span>' :
+                  (r.changed ? '<span class="tag tag-ok">หมุน</span>' : '')) + '</td></tr>';
+            });
+            html += '</tbody></table></div></div>';
+          });
+        }
+        document.getElementById('rotResult').innerHTML = html + '</div></div>';
+      })
+      .catch(function (e) { busy(false); showError(e); });
+  };
+
+  var dpv = document.getElementById('rDayPreview');
+  if (dpv) dpv.onclick = function () {
+    busy(true);
+    call('semester.list', {})
+      .then(function (list) {
+        busy(false);
+        if (!list.length) return modal({ title: 'พรีวิวการหมุนวัน', text: 'ยังไม่มีภาคเรียนในระบบ' });
+        formModal('พรีวิว/ใช้งานการหมุนวัน',
+          [
+            { key: 'fromSemesterId', label: 'ภาคเรียนต้นทาง', type: 'select', required: true, wide: true,
+              options: list.map(function (s) { return { value: s.id, label: s.name }; }) },
+            { key: 'dayShift', label: 'เลื่อนไปกี่วัน', type: 'number', min: 1, max: 4, value: 1,
+              hint: 'จันทร์→อังคาร ใช้ค่า 1' }
+          ],
+          function (v) {
+            return call('rotation.dayPreview', v).then(function (d) {
+              var html = '<div class="card"><div class="card-head"><div>' +
+                '<div class="card-title">ผลการหมุนวันจาก ' + esc(d.fromSemester.name) + '</div>' +
+                '<div class="card-sub">ทั้งหมด ' + d.total + ' · ย้ายวัน ' + d.moved + ' · ตรึงไว้ ' + d.locked + '</div>' +
+                '</div></div><div class="card-body"><div class="table-wrap"><table class="tb"><thead><tr>' +
+                '<th>ครู</th><th>จุด</th><th>ช่วงเวลา</th><th>วันเดิม</th><th>วันใหม่</th></tr></thead><tbody>' +
+                d.rows.map(function (r) {
+                  return '<tr><td>' + esc(r.teacherName) + '</td><td>' + esc(r.pointName) + '</td>' +
+                    '<td class="small">' + esc(r.slotName) + '</td><td>' + esc(r.fromWeekdayName) + '</td>' +
+                    '<td>' + (r.moved ? '<b>' + esc(r.toWeekdayName) + '</b>' :
+                      esc(r.toWeekdayName) + ' <span class="tag tag-muted">ตรึง</span>') + '</td></tr>';
+                }).join('') + '</tbody></table></div></div></div>';
+              document.getElementById('rotResult').innerHTML = html;
+              return true;
+            });
+          }, 'พรีวิว');
+      })
+      .catch(function (e) { busy(false); showError(e); });
+  };
+
+  var hist = document.getElementById('rHistory');
+  if (hist) hist.onclick = function () {
+    busy(true);
+    call('rotation.history', {})
+      .then(function (rows) {
+        busy(false);
+        var node = el('div', {});
+        node.innerHTML = rows.length
+          ? '<div class="table-wrap"><table class="tb"><thead><tr><th>ปลายทาง</th><th>ต้นทาง</th>' +
+            '<th class="num">เลื่อนวัน</th><th class="num">เลื่อนจุด</th><th class="num">รายการ</th>' +
+            '<th>สถานะ</th><th>โดย</th></tr></thead><tbody>' +
+            rows.map(function (r) {
+              return '<tr><td>' + esc(r.semesterName) + '</td><td>' + esc(r.fromSemesterName) + '</td>' +
+                '<td class="num">' + r.dayShift + '</td><td class="num">' + r.pointShift + '</td>' +
+                '<td class="num">' + nf(r.affected) + '</td><td>' + esc(r.status) + '</td>' +
+                '<td class="small">' + esc(r.appliedBy) + '</td></tr>';
+            }).join('') + '</tbody></table></div>'
+          : '<p>ยังไม่มีประวัติการหมุนเวร</p>';
+        modal({ title: 'ประวัติการหมุนเวร', node: node });
+      })
+      .catch(function (e) { busy(false); showError(e); });
+  };
+}
+
+function bindGenerate(body) {
+  var run = document.getElementById('gRun');
+  if (!run) return;
+  run.onclick = function () {
+    var from = $('gFrom').value, to = $('gTo').value, rebuild = $('gRebuild').value === '1';
+    confirmBox('สร้างตารางเวรรายวัน',
+      'ระบบจะสร้างตารางตั้งแต่ ' + thaiShort(from) + ' ถึง ' + thaiShort(to) +
+      (rebuild ? '\n\nวันที่มีตารางอยู่แล้วและยังไม่มีการเช็คอินจะถูกสร้างใหม่ทับ' :
+        '\n\nวันที่มีตารางอยู่แล้วจะถูกข้ามไป') +
+      '\n\nดำเนินการหรือไม่',
+      function () {
+        busy(true);
+        call('schedule.generate', { from: from, to: to, rebuild: rebuild })
+          .then(function (r) {
+            busy(false); clearCache();
+            document.getElementById('gResult').innerHTML =
+              '<div class="alert alert-ACTION">สร้างเรียบร้อย — วันทำการ ' + nf(r.days) +
+              ' วัน · สร้างใหม่ ' + nf(r.created) + ' รายการ · ข้าม ' + nf(r.skipped) + ' รายการ' +
+              (r.lockedDays ? ' · ข้ามวันที่มีการเช็คอินแล้ว ' + r.lockedDays + ' วัน' : '') + '</div>';
+            toast('สร้างตารางเรียบร้อย', 'ok');
+          })
+          .catch(function (e) { busy(false); showError(e, 'สร้างตารางไม่สำเร็จ'); });
+      }, 'สร้างตาราง');
+  };
+}
+
+/* ---------- อนุมัติ ---------- */
+
+function bindApproveActions(root) {
+  root.querySelectorAll('[data-act="swapOk"]').forEach(function (b) {
+    b.onclick = function () {
+      confirmBox('อนุมัติคำขอ', 'ยืนยันการอนุมัติคำขอเปลี่ยนเวรนี้ ' +
+        'ระบบจะบันทึกชื่อและระดับของท่านเป็นผู้อนุมัติ', function () {
+          busy(true);
+          call('swap.approve', { id: b.getAttribute('data-id') })
+            .then(function () { busy(false); clearCache(); toast('อนุมัติเรียบร้อย', 'ok'); refreshBoot(); })
+            .catch(function (e) { busy(false); showError(e); });
+        }, 'อนุมัติ');
+    };
+  });
+  root.querySelectorAll('[data-act="swapNo"]').forEach(function (b) {
+    b.onclick = function () {
+      reasonPrompt('ไม่อนุมัติคำขอ', 'เหตุผลที่ไม่อนุมัติ', function (reason) {
+        return call('swap.reject', { id: b.getAttribute('data-id'), reason: reason })
+          .then(function () { refreshBoot(); });
+      }, 'ไม่อนุมัติ');
+    };
+  });
+  root.querySelectorAll('[data-act="swapCancel"]').forEach(function (b) {
+    b.onclick = function () {
+      confirmBox('ยกเลิกคำขอ', 'ต้องการยกเลิกคำขอนี้ใช่หรือไม่', function () {
+        busy(true);
+        call('swap.cancel', { id: b.getAttribute('data-id') })
+          .then(function () { busy(false); clearCache(); toast('ยกเลิกแล้ว', 'ok'); refreshBoot(); })
+          .catch(function (e) { busy(false); showError(e); });
+      });
+    };
+  });
+}
+
+function refreshBoot() {
+  return call('bootstrap').then(function (d) {
+    App.boot = d;
+    renderNav();
+    renderView();
+  }).catch(function () { renderView(); });
+}
+
+/* ---------- รายงาน ---------- */
+
+function bindReportDaily(body, d) {
+  var g = document.getElementById('rdGo');
+  if (g) g.onclick = function () { go('report', { tab: 'daily', rdate: $('rdDate').value }); };
+
+  var pr = document.getElementById('rdPrint');
+  if (pr) pr.onclick = function () { window.print(); };
+
+  var pdf = document.getElementById('rdPdf');
+  if (pdf) pdf.onclick = function () {
+    busy(true);
+    call('report.pdf', { date: d.date })
+      .then(function (r) {
+        busy(false);
+        modal({
+          title: 'สร้าง PDF เรียบร้อย',
+          node: el('div', { html: '<p>ไฟล์: <b>' + esc(r.name) + '</b> (' + r.rows + ' รายการ)</p>' +
+            '<p><a href="' + esc(r.url) + '" target="_blank" rel="noopener">เปิดดูใน Google Drive</a></p>' +
+            '<p><a href="' + esc(r.downloadUrl) + '" target="_blank" rel="noopener">ดาวน์โหลดไฟล์</a></p>' })
+        });
+      })
+      .catch(function (e) { busy(false); showError(e, 'สร้าง PDF ไม่สำเร็จ'); });
+  };
+
+  var sh = document.getElementById('rdSheet');
+  if (sh) sh.onclick = function () { exportSheet('DAILY', { date: d.date }); };
+}
+
+function exportSheet(kind, opts) {
+  busy(true);
+  var payload = Object.assign({ kind: kind }, opts || {});
+  call('report.export', payload)
+    .then(function (r) {
+      busy(false);
+      modal({
+        title: 'ส่งออกเรียบร้อย',
+        node: el('div', { html: '<p>สร้างชีต <b>' + esc(r.sheetName) + '</b> จำนวน ' + nf(r.rows) + ' แถว</p>' +
+          '<p><a href="' + esc(r.url) + '" target="_blank" rel="noopener">เปิดชีต</a></p>' })
+      });
+    })
+    .catch(function (e) { busy(false); showError(e, 'ส่งออกไม่สำเร็จ'); });
+}
+
+function bindReportGroup(body, d) {
+  var g = document.getElementById('gGo');
+  if (g) g.onclick = function () {
+    go('report', { tab: 'group', gfrom: $('gFrom2').value, gto: $('gTo2').value, groupBy: $('gDim').value });
+  };
+  var sh = document.getElementById('gSheet');
+  if (sh) sh.onclick = function () {
+    exportSheet('GROUP', { from: d.from, to: d.to, groupBy: d.groupBy });
+  };
+  body.querySelectorAll('[data-drill]').forEach(function (b) {
+    b.onclick = function () {
+      busy(true);
+      call('report.drill', {
+        from: d.from, to: d.to, groupBy: d.groupBy, group: b.getAttribute('data-drill')
+      })
+        .then(function (r) {
+          busy(false);
+          var html = '<div class="card"><div class="card-head"><div>' +
+            '<div class="card-title">รายชื่อครูในกลุ่ม: ' + esc(r.group) + '</div>' +
+            '<div class="card-sub">' + nf(r.rows.length) + ' คน · เวรรวม ' + nf(r.overall.total) + ' ช่อง</div>' +
+            '</div></div><div class="card-body"><div class="table-wrap"><table class="tb"><thead><tr>' +
+            '<th>ครู</th><th>กลุ่มสาระ</th><th class="num">เวร</th><th class="num">อยู่ครบ</th>' +
+            '<th class="num">สาย</th><th class="num">ไม่ครบ</th><th class="num">ไม่อยู่</th>' +
+            '<th style="min-width:140px">% ปฏิบัติงาน</th></tr></thead><tbody>' +
+            r.rows.map(function (t) {
+              return '<tr><td>' + esc(t.name) + '</td><td class="small muted">' + esc(t.department) + '</td>' +
+                '<td class="num">' + nf(t.duties) + '</td><td class="num">' + nf(t.present) + '</td>' +
+                '<td class="num">' + nf(t.late) + '</td><td class="num">' + nf(t.partial) + '</td>' +
+                '<td class="num">' + (t.absent ? '<span class="tag tag-danger">' + t.absent + '</span>' : '0') + '</td>' +
+                '<td>' + bar(t.attendRate) + '</td></tr>';
+            }).join('') + '</tbody></table></div></div></div>';
+          document.getElementById('drillBox').innerHTML = html;
+          document.getElementById('drillBox').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        })
+        .catch(function (e) { busy(false); showError(e); });
+    };
+  });
+}
+
+function bindReportSwap(body, d) {
+  var g = document.getElementById('sGo');
+  if (g) g.onclick = function () {
+    go('report', { tab: 'swap', sfrom: $('sFrom').value, sto: $('sTo').value });
+  };
+  var sh = document.getElementById('sSheet');
+  if (sh) sh.onclick = function () { exportSheet('SWAP', { from: d.from, to: d.to }); };
+}
+
+function bindIncidentActions(body) {
+  body.querySelectorAll('[data-act="handleInc"]').forEach(function (b) {
+    b.onclick = function () {
+      formModal('ดำเนินการเหตุการณ์',
+        [
+          { key: 'status', label: 'สถานะ', type: 'select', required: true, wide: true,
+            options: [{ value: 'HANDLING', label: 'กำลังดำเนินการ' }, { value: 'CLOSED', label: 'ปิดเรื่องแล้ว' }] },
+          { key: 'note', label: 'ผลการดำเนินการ', type: 'textarea', wide: true,
+            hint: 'บังคับกรอกเมื่อปิดเรื่อง (อย่างน้อย 5 ตัวอักษร)' }
+        ],
+        function (v) {
+          return call('incident.handle', { id: b.getAttribute('data-id'), status: v.status, note: v.note });
+        }, 'บันทึก');
+    };
+  });
+}
+
+/* ---------- ข้อมูลหลัก ---------- */
+
+function teacherFields(t) {
+  return [
+    { key: 'code', label: 'รหัสครู', value: t ? t.code : '' },
+    { key: 'prefix', label: 'คำนำหน้า', value: t ? t.prefix : '', placeholder: 'นาย / นาง / นางสาว' },
+    { key: 'firstName', label: 'ชื่อ', required: true, value: t ? t.firstName : '' },
+    { key: 'lastName', label: 'นามสกุล', required: true, value: t ? t.lastName : '' },
+    { key: 'email', label: 'อีเมล Google', required: true, wide: true, value: t ? t.email : '',
+      hint: 'ต้องเป็นอีเมลที่ใช้เข้าสู่ระบบจริง' },
+    { key: 'department', label: 'กลุ่มสาระ/ฝ่าย', value: t ? t.department : '' },
+    { key: 'position', label: 'ตำแหน่ง', value: t ? t.position : '' },
+    { key: 'phone', label: 'โทรศัพท์', value: t ? t.phone : '' },
+    { key: 'role', label: 'บทบาทในระบบ', type: 'select', value: t ? t.role : 'TEACHER',
+      options: [
+        { value: 'TEACHER', label: 'ครู' },
+        { value: 'DAILY_HEAD', label: 'หัวหน้าเวรประจำวัน' },
+        { value: 'DUTY_ADMIN', label: 'หัวหน้างานเวร' },
+        { value: 'EXECUTIVE', label: 'ผู้บริหาร' },
+        { value: 'SYS_ADMIN', label: 'ผู้ดูแลระบบ' }
+      ] }
+  ];
+}
+
+function bindTeacherActions(body) {
+  function addTeacher() {
+    formModal('เพิ่มครู', teacherFields(null), function (v) { return call('teacher.save', v); });
+  }
+  var a1 = document.getElementById('tAdd'); if (a1) a1.onclick = addTeacher;
+  var a2 = document.getElementById('tAdd2'); if (a2) a2.onclick = addTeacher;
+
+  var s = document.getElementById('tSearch');
+  if (s) s.onclick = function () { go('master', { tab: 'teacher', q: $('tQ').value }); };
+  var q = document.getElementById('tQ');
+  if (q) q.onkeydown = function (e) { if (e.key === 'Enter') go('master', { tab: 'teacher', q: q.value }); };
+
+  body.querySelectorAll('[data-act="editTeacher"]').forEach(function (b) {
+    b.onclick = function () {
+      busy(true);
+      call('teacher.get', { id: b.getAttribute('data-id') })
+        .then(function (t) {
+          busy(false);
+          var f = teacherFields(t);
+          formModal('แก้ไขข้อมูลครู', f, function (v) {
+            v.id = t.id;
+            return call('teacher.save', v);
+          });
+        })
+        .catch(function (e) { busy(false); showError(e); });
+    };
+  });
+
+  body.querySelectorAll('[data-act="toggleTeacher"]').forEach(function (b) {
+    b.onclick = function () {
+      var st = b.getAttribute('data-status');
+      confirmBox(st === 'ACTIVE' ? 'เปิดใช้งานบัญชี' : 'ระงับการใช้งาน',
+        st === 'ACTIVE' ? 'ให้ครูรายนี้เข้าใช้ระบบได้อีกครั้งใช่หรือไม่'
+          : 'ระงับการเข้าใช้ระบบของครูรายนี้ (ข้อมูลและประวัติทั้งหมดยังคงอยู่)',
+        function () {
+          busy(true);
+          call('teacher.status', { id: b.getAttribute('data-id'), status: st })
+            .then(function () { busy(false); clearCache(); toast('ปรับสถานะเรียบร้อย', 'ok'); renderView(); })
+            .catch(function (e) { busy(false); showError(e); });
+        });
+    };
+  });
+
+  var imp = document.getElementById('tImport');
+  if (imp) imp.onclick = openImport;
+}
+
+function openImport() {
+  busy(true);
+  call('teacher.importTemplate', {})
+    .then(function (t) {
+      busy(false);
+      var node = el('div', {});
+      node.innerHTML =
+        '<p class="small muted">วางข้อมูลจาก Excel หรือ Google Sheets (คั่นด้วยจุลภาคหรือแท็บ) ' +
+        'บรรทัดแรกต้องเป็นหัวตาราง</p>' +
+        '<div class="field"><label>ข้อมูลนำเข้า</label>' +
+        '<textarea class="input" id="impText" style="min-height:150px">' + esc(t.text) + '</textarea>' +
+        '<div class="hint">คอลัมน์ที่จำเป็น: ชื่อ, นามสกุล, อีเมล</div></div>' +
+        '<div id="impPreview"></div>';
+
+      modal({
+        title: 'นำเข้าครูหลายรายการ',
+        node: node,
+        buttons: [
+          { label: 'ปิด', onClick: closeModal },
+          {
+            label: 'ตรวจสอบข้อมูล', onClick: function () {
+              busy(true);
+              call('teacher.importPreview', { text: document.getElementById('impText').value })
+                .then(function (p) {
+                  busy(false);
+                  var rows = p.rows.slice(0, 50).map(function (r) {
+                    return '<tr><td class="small">' + r._line + '</td><td>' + esc(r.firstName + ' ' + r.lastName) + '</td>' +
+                      '<td class="small">' + esc(r.email) + '</td><td class="small">' + esc(r.department || '') + '</td>' +
+                      '<td>' + (r._errors.length ? '<span class="tag tag-danger">' + esc(r._errors.join(', ')) + '</span>' :
+                        '<span class="tag tag-ok">' + (r._mode === 'UPDATE' ? 'อัปเดต' : 'เพิ่มใหม่') + '</span>') + '</td></tr>';
+                  }).join('');
+                  document.getElementById('impPreview').innerHTML =
+                    '<div class="alert alert-INFO">ทั้งหมด ' + p.total + ' แถว · เพิ่มใหม่ ' + p.create +
+                    ' · อัปเดต ' + p.update + ' · มีปัญหา ' + p.error + '</div>' +
+                    '<div class="table-wrap"><table class="tb"><thead><tr><th>บรรทัด</th><th>ชื่อ</th>' +
+                    '<th>อีเมล</th><th>กลุ่มสาระ</th><th>ผล</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+                  var foot = $('modalFoot');
+                  if (!document.getElementById('impCommit') && (p.create + p.update) > 0) {
+                    foot.appendChild(el('button', {
+                      class: 'btn btn-primary', id: 'impCommit', type: 'button',
+                      text: 'นำเข้า ' + (p.create + p.update) + ' รายการ',
+                      onclick: function () {
+                        busy(true);
+                        call('teacher.importCommit', { text: document.getElementById('impText').value })
+                          .then(function (r) {
+                            busy(false); closeModal(); clearCache();
+                            toast('นำเข้าเรียบร้อย — เพิ่ม ' + r.created + ' · อัปเดต ' + r.updated, 'ok');
+                            renderView();
+                          })
+                          .catch(function (e) { busy(false); showError(e); });
+                      }
+                    }));
+                  }
+                })
+                .catch(function (e) { busy(false); showError(e, 'ตรวจสอบข้อมูลไม่สำเร็จ'); });
+            }
+          }
+        ]
+      });
+    })
+    .catch(function (e) { busy(false); showError(e); });
+}
+
+function bindSlotActions(body, rows) {
+  function fields(s) {
+    return [
+      { key: 'code', label: 'รหัส', value: s ? s.code : '' },
+      { key: 'name', label: 'ชื่อช่วงเวลา', required: true, value: s ? s.name : '', placeholder: 'เวรเช้า' },
+      { key: 'startTime', label: 'เวลาเริ่ม', type: 'time', required: true, value: s ? s.startTime : '07:00' },
+      { key: 'endTime', label: 'เวลาสิ้นสุด', type: 'time', required: true, value: s ? s.endTime : '08:20' },
+      { key: 'sortOrder', label: 'ลำดับการแสดง', type: 'number', min: 1, value: s ? s.sortOrder : 1 },
+      { key: 'status', label: 'สถานะ', type: 'select', value: s ? s.status : 'ACTIVE',
+        options: [{ value: 'ACTIVE', label: 'ใช้งาน' }, { value: 'INACTIVE', label: 'ปิด' }] }
+    ];
+  }
+  var add = document.getElementById('sAdd');
+  if (add) add.onclick = function () {
+    formModal('เพิ่มช่วงเวลา', fields(null), function (v) { return call('slot.save', v); });
+  };
+  body.querySelectorAll('[data-act="editSlot"]').forEach(function (b) {
+    b.onclick = function () {
+      var s = rows.filter(function (x) { return x.id === b.getAttribute('data-id'); })[0];
+      formModal('แก้ไขช่วงเวลา', fields(s), function (v) { v.id = s.id; return call('slot.save', v); });
+    };
+  });
+}
+
+function bindPointActions(body, rows) {
+  function fields(p) {
+    return [
+      { key: 'code', label: 'รหัสจุด', value: p ? p.code : '' },
+      { key: 'name', label: 'ชื่อจุดเวร', required: true, value: p ? p.name : '', placeholder: 'ประตูหน้าโรงเรียน' },
+      { key: 'description', label: 'คำอธิบาย', wide: true, value: p ? p.description : '' },
+      { key: 'lat', label: 'ละติจูด', type: 'number', step: 'any', value: p ? p.lat : '',
+        hint: 'เปิด Google Maps คลิกขวาที่จุด แล้วคัดลอกพิกัด' },
+      { key: 'lng', label: 'ลองจิจูด', type: 'number', step: 'any', value: p ? p.lng : '' },
+      { key: 'radius', label: 'รัศมี (เมตร)', type: 'number', min: 10, max: 1000, value: p ? p.radius : 80 },
+      { key: 'seatCount', label: 'จำนวนที่นั่ง', type: 'number', min: 1, max: 20, value: p ? p.seatCount : 1 },
+      { key: 'rotationGroup', label: 'กลุ่มการหมุนจุด', value: p ? p.rotationGroup : 'DEFAULT',
+        hint: 'จุดที่อยู่กลุ่มเดียวกันจะหมุนสลับครูกัน' },
+      { key: 'sortOrder', label: 'ลำดับการแสดง', type: 'number', min: 1, value: p ? p.sortOrder : 1 },
+      { key: 'status', label: 'สถานะ', type: 'select', value: p ? p.status : 'ACTIVE',
+        options: [{ value: 'ACTIVE', label: 'ใช้งาน' }, { value: 'INACTIVE', label: 'ปิด' }] }
+    ];
+  }
+  var add = document.getElementById('pAdd');
+  if (add) add.onclick = function () {
+    formModal('เพิ่มจุดเวร', fields(null), function (v) { return call('point.save', v); });
+    useMyLocationButton();
+  };
+  body.querySelectorAll('[data-act="editPoint"]').forEach(function (b) {
+    b.onclick = function () {
+      var p = rows.filter(function (x) { return x.id === b.getAttribute('data-id'); })[0];
+      formModal('แก้ไขจุดเวร', fields(p), function (v) { v.id = p.id; return call('point.save', v); });
+      useMyLocationButton();
+    };
+  });
+}
+
+function useMyLocationButton() {
+  var latField = document.getElementById('f_lat');
+  if (!latField || !latField.parentNode) return;
+  var btn = el('button', {
+    class: 'btn btn-sm mt8', type: 'button', text: '📍 ใช้พิกัดปัจจุบันของฉัน',
+    onclick: function () {
+      btn.textContent = 'กำลังอ่านพิกัด…';
+      getGeo().then(function (g) {
+        btn.textContent = '📍 ใช้พิกัดปัจจุบันของฉัน';
+        if (g.lat === null) return toast('อ่านพิกัดไม่สำเร็จ กรุณาอนุญาตการเข้าถึงตำแหน่ง', 'err');
+        document.getElementById('f_lat').value = g.lat.toFixed(6);
+        document.getElementById('f_lng').value = g.lng.toFixed(6);
+        toast('ใส่พิกัดแล้ว (±' + g.accuracy + ' ม.)', 'ok');
+      });
+    }
+  });
+  latField.parentNode.appendChild(btn);
+}
+
+function bindSemesterActions(body, rows) {
+  function fields(s) {
+    var y = new Date().getFullYear() + 543;
+    return [
+      { key: 'yearBe', label: 'ปีการศึกษา (พ.ศ.)', type: 'number', required: true, min: 2500, max: 2700,
+        value: s ? s.yearBe : y, hint: 'เช่น ' + y },
+      { key: 'term', label: 'ภาคเรียนที่', type: 'select', required: true, value: s ? s.term : 1,
+        options: [{ value: 1, label: '1' }, { value: 2, label: '2' }] },
+      { key: 'name', label: 'ชื่อภาคเรียน', wide: true, value: s ? s.name : '',
+        hint: 'เว้นว่างเพื่อให้ระบบตั้งให้อัตโนมัติ' },
+      { key: 'startDate', label: 'วันเปิดภาคเรียน', type: 'date', required: true, value: s ? s.startDate : '' },
+      { key: 'endDate', label: 'วันปิดภาคเรียน', type: 'date', required: true, value: s ? s.endDate : '' },
+      { key: 'isActive', label: 'เปิดใช้งาน', type: 'select', value: s ? (s.isActive ? 'true' : 'false') : 'true',
+        options: [{ value: 'true', label: 'ใช่ — ใช้ภาคเรียนนี้' }, { value: 'false', label: 'ไม่' }] }
+    ];
+  }
+  var add = document.getElementById('semAdd');
+  if (add) add.onclick = function () {
+    formModal('เพิ่มภาคเรียน', fields(null), function (v) {
+      v.isActive = v.isActive === 'true';
+      return call('semester.save', v);
+    });
+  };
+  body.querySelectorAll('[data-act="editSem"]').forEach(function (b) {
+    b.onclick = function () {
+      var s = rows.filter(function (x) { return x.id === b.getAttribute('data-id'); })[0];
+      formModal('แก้ไขภาคเรียน', fields(s), function (v) {
+        v.id = s.id;
+        v.isActive = v.isActive === 'true';
+        return call('semester.save', v);
+      });
+    };
+  });
+  body.querySelectorAll('[data-act="actSem"]').forEach(function (b) {
+    b.onclick = function () {
+      confirmBox('เปิดใช้ภาคเรียน', 'ระบบจะใช้ภาคเรียนนี้ในการจัดเวรและสร้างตารางรายวัน', function () {
+        busy(true);
+        call('semester.activate', { id: b.getAttribute('data-id') })
+          .then(function () { busy(false); clearCache(); toast('เปิดใช้งานแล้ว', 'ok'); refreshBoot(); })
+          .catch(function (e) { busy(false); showError(e); });
+      }, 'เปิดใช้');
+    };
+  });
+}
+
+function bindCalendarActions(body) {
+  var add = document.getElementById('calAdd');
+  if (add) add.onclick = function () {
+    busy(true);
+    cachedCall('calendar.dayTypes', {})
+      .then(function (types) {
+        busy(false);
+        formModal('เพิ่มวันพิเศษ',
+          [
+            { key: 'date', label: 'วันที่', type: 'date', required: true, value: todayStr() },
+            { key: 'dayType', label: 'ประเภท', type: 'select', required: true, options: types },
+            { key: 'note', label: 'หมายเหตุ', wide: true }
+          ],
+          function (v) { return call('calendar.save', v); });
+      })
+      .catch(function (e) { busy(false); showError(e); });
+  };
+
+  var range = document.getElementById('calRange');
+  if (range) range.onclick = function () {
+    busy(true);
+    cachedCall('calendar.dayTypes', {})
+      .then(function (types) {
+        busy(false);
+        formModal('เพิ่มเป็นช่วงวันที่',
+          [
+            { key: 'from', label: 'ตั้งแต่', type: 'date', required: true, value: todayStr() },
+            { key: 'to', label: 'ถึง', type: 'date', required: true, value: todayStr() },
+            { key: 'dayType', label: 'ประเภท', type: 'select', required: true, options: types },
+            { key: 'note', label: 'หมายเหตุ', wide: true }
+          ],
+          function (v) { return call('calendar.addRange', v); });
+      })
+      .catch(function (e) { busy(false); showError(e); });
+  };
+
+  body.querySelectorAll('[data-act="delCal"]').forEach(function (b) {
+    b.onclick = function () {
+      confirmBox('ลบรายการปฏิทิน', 'ต้องการลบวันนี้ออกจากปฏิทินใช่หรือไม่', function () {
+        busy(true);
+        call('calendar.remove', { id: b.getAttribute('data-id') })
+          .then(function () { busy(false); clearCache(); toast('ลบแล้ว', 'ok'); renderView(); })
+          .catch(function (e) { busy(false); showError(e); });
+      }, 'ลบ');
+    };
+  });
+}
+
+/* ---------- ตั้งค่า ---------- */
+
+function bindSettings(root) {
+  var save = document.getElementById('cfgSave');
+  if (save) save.onclick = function () {
+    var nodes = Array.prototype.slice.call(root.querySelectorAll('.cfg'));
+    busy(true);
+    var chain = Promise.resolve();
+    var failed = [];
+    nodes.forEach(function (n) {
+      chain = chain.then(function () {
+        return call('config.set', { key: n.getAttribute('data-key'), value: n.value })
+          .catch(function (e) { failed.push(n.getAttribute('data-key') + ': ' + e.message); });
+      });
+    });
+    chain.then(function () {
+      busy(false); clearCache();
+      if (failed.length) showError(failed.join('\n'), 'บางค่าบันทึกไม่สำเร็จ');
+      else toast('บันทึกการตั้งค่าเรียบร้อย', 'ok');
+      refreshBoot();
+    });
+  };
+
+  var d = document.getElementById('cfgDiag');
+  if (d) d.onclick = function () { go('system'); };
+}
+
+/* ---------- ระบบ ---------- */
+
+function bindSystemActions(root) {
+  var r = document.getElementById('sysRefresh');
+  if (r) r.onclick = function () { clearCache(); renderView(); };
+
+  var c = document.getElementById('sysCache');
+  if (c) c.onclick = function () {
+    busy(true);
+    call('system.clearCache', {})
+      .then(function (x) { busy(false); clearCache(); toast(x.message, 'ok'); renderView(); })
+      .catch(function (e) { busy(false); showError(e); });
+  };
+
+  var rp = document.getElementById('sysRepair');
+  if (rp) rp.onclick = function () {
+    confirmBox('ซ่อมข้อมูล',
+      'ระบบจะลบรายการตารางรายวันที่อ้างถึงครู จุดเวร หรือช่วงเวลาที่ไม่มีอยู่แล้ว\n\n' +
+      'รายการที่มีการเช็คอินไปแล้วจะไม่ถูกแตะต้อง\n\n' +
+      'หลังซ่อมเสร็จ ให้สั่งสร้างตารางรายวันใหม่อีกครั้ง',
+      function () {
+        busy(true);
+        call('system.repair', {})
+          .then(function (x) {
+            busy(false); clearCache();
+            modal({ title: 'ซ่อมข้อมูลเรียบร้อย', text: x.message });
+          })
+          .catch(function (e) { busy(false); showError(e); });
+      }, 'ซ่อมข้อมูล');
+  };
+}
+</script>

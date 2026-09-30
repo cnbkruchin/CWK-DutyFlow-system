@@ -1,0 +1,16 @@
+{
+  "name": "cwk-dutyflow",
+  "version": "2.0.0",
+  "description": "CWK DutyFlow — ระบบบริหารเวรประจำวัน โรงเรียนจุนวิทยาคม (Google Apps Script + Google Sheets)",
+  "private": true,
+  "scripts": {
+    "test": "node test/run.js && node test/static-check.js && node test/frontend-check.js",
+    "test:unit": "node test/run.js",
+    "test:static": "node test/static-check.js",
+    "test:frontend": "node test/frontend-check.js",
+    "push": "clasp push",
+    "deploy": "clasp deploy --description \"CWK DutyFlow v2\""
+  },
+  "engines": { "node": ">=18" },
+  "license": "UNLICENSED"
+}
