@@ -9,7 +9,8 @@
  * fields: [{key,label,type,value,options,required,hint,min,max,placeholder}]
  * onSubmit(values) -> Promise
  */
-function formModal(title, fields, onSubmit, submitLabel) {
+/** กล่องฟอร์มทั่วไป — onSaved(ผลลัพธ์) ถูกเรียกหลังบันทึกสำเร็จและปิดกล่องแล้ว */
+function formModal(title, fields, onSubmit, submitLabel, onSaved) {
   var wrap = el('div', {});
   var html = '<div class="form-row">';
   fields.forEach(function (f) {
@@ -31,6 +32,7 @@ function formModal(title, fields, onSubmit, submitLabel) {
         (f.min !== undefined ? ' min="' + f.min + '"' : '') +
         (f.max !== undefined ? ' max="' + f.max + '"' : '') +
         (f.step !== undefined ? ' step="' + f.step + '"' : '') +
+        (f.autocomplete ? ' autocomplete="' + esc(f.autocomplete) + '" autocapitalize="none" spellcheck="false"' : '') +
         ' value="' + esc(f.value === null || f.value === undefined ? '' : f.value) + '"' +
         ' placeholder="' + esc(f.placeholder || '') + '">';
     }
@@ -62,10 +64,11 @@ function formModal(title, fields, onSubmit, submitLabel) {
           }
           busy(true);
           Promise.resolve(onSubmit(values))
-            .then(function () {
+            .then(function (result) {
               busy(false); closeModal(); clearCache();
               toast('บันทึกเรียบร้อย', 'ok');
               renderView();
+              if (onSaved) onSaved(result);
             })
             .catch(function (e) { busy(false); showError(e, 'บันทึกไม่สำเร็จ'); });
         }
@@ -793,16 +796,27 @@ function bindIncidentActions(body) {
 /* ---------- ข้อมูลหลัก ---------- */
 
 function teacherFields(t) {
-  return [
+  var fields = [
     { key: 'code', label: 'รหัสครู', value: t ? t.code : '' },
     { key: 'prefix', label: 'คำนำหน้า', value: t ? t.prefix : '', placeholder: 'นาย / นาง / นางสาว' },
     { key: 'firstName', label: 'ชื่อ', required: true, value: t ? t.firstName : '' },
     { key: 'lastName', label: 'นามสกุล', required: true, value: t ? t.lastName : '' },
-    { key: 'email', label: 'อีเมล Google', required: true, wide: true, value: t ? t.email : '',
-      hint: 'ต้องเป็นอีเมลที่ใช้เข้าสู่ระบบจริง' },
+    { key: 'username', label: 'ชื่อผู้ใช้ (ใช้เข้าสู่ระบบ)', required: true, value: t ? t.username : '',
+      placeholder: 'เช่น somchai', autocomplete: 'off',
+      hint: 'a-z ตัวเล็ก ตัวเลข . _ - ยาว 3–32 ตัว ขึ้นต้นด้วยตัวอักษร' }
+  ];
+  if (!t) {
+    // ช่องข้อความธรรมดา ผู้ดูแลเห็นสิ่งที่พิมพ์ และเบราว์เซอร์จะไม่เติมรหัสผ่านของผู้ดูแลเอง
+    fields.push({ key: 'password', label: 'รหัสผ่านเริ่มต้น', value: '', autocomplete: 'off',
+      placeholder: 'เว้นว่าง = ระบบสร้างให้',
+      hint: 'ถ้าเว้นว่าง ระบบจะสร้างรหัสผ่านชั่วคราวและแสดงให้หลังบันทึก' });
+  }
+  return fields.concat([
     { key: 'department', label: 'กลุ่มสาระ/ฝ่าย', value: t ? t.department : '' },
     { key: 'position', label: 'ตำแหน่ง', value: t ? t.position : '' },
     { key: 'phone', label: 'โทรศัพท์', value: t ? t.phone : '' },
+    { key: 'email', label: 'อีเมล (ไม่บังคับ)', value: t ? t.email : '',
+      hint: 'ใช้รับการแจ้งเตือนทางอีเมลเท่านั้น ไม่ได้ใช้เข้าสู่ระบบ' },
     { key: 'role', label: 'บทบาทในระบบ', type: 'select', value: t ? t.role : 'TEACHER',
       options: [
         { value: 'TEACHER', label: 'ครู' },
@@ -811,12 +825,15 @@ function teacherFields(t) {
         { value: 'EXECUTIVE', label: 'ผู้บริหาร' },
         { value: 'SYS_ADMIN', label: 'ผู้ดูแลระบบ' }
       ] }
-  ];
+  ]);
 }
 
 function bindTeacherActions(body) {
   function addTeacher() {
-    formModal('เพิ่มครู', teacherFields(null), function (v) { return call('teacher.save', v); });
+    formModal('เพิ่มครู', teacherFields(null), function (v) { return call('teacher.save', v); }, 'บันทึก',
+      function (r) {
+        if (r && r.tempPassword) showCredentials('บัญชีของ ' + r.name, [r]);
+      });
   }
   var a1 = document.getElementById('tAdd'); if (a1) a1.onclick = addTeacher;
   var a2 = document.getElementById('tAdd2'); if (a2) a2.onclick = addTeacher;
@@ -857,8 +874,143 @@ function bindTeacherActions(body) {
     };
   });
 
+  body.querySelectorAll('[data-act="resetPw"]').forEach(function (b) {
+    b.onclick = function () {
+      confirmBox('รีเซ็ตรหัสผ่าน',
+        'สร้างรหัสผ่านชั่วคราวใหม่ให้ ' + b.getAttribute('data-name') + '\n' +
+        'รหัสผ่านเดิมจะใช้ไม่ได้ทันที และเครื่องที่เข้าสู่ระบบค้างไว้ต้องเข้าสู่ระบบใหม่',
+        function () {
+          busy(true);
+          call('teacher.resetPassword', { id: b.getAttribute('data-id') })
+            .then(function (r) {
+              busy(false); clearCache(); renderView();
+              showCredentials('รีเซ็ตรหัสผ่านเรียบร้อย', [r]);
+            })
+            .catch(function (e) { busy(false); showError(e); });
+        }, 'รีเซ็ตรหัสผ่าน');
+    };
+  });
+
+  var issue = document.getElementById('tIssue');
+  if (issue) issue.onclick = function () {
+    confirmBox('ออกรหัสผ่านชั่วคราว',
+      'สร้างชื่อผู้ใช้ (ถ้ายังไม่มี) และรหัสผ่านชั่วคราวให้ครูที่ยังเข้าสู่ระบบไม่ได้ ' +
+      issue.getAttribute('data-count') + ' คน\nครูที่มีรหัสผ่านแล้วจะไม่ได้รับผลกระทบ',
+      function () {
+        busy(true);
+        call('teacher.issuePasswords', {})
+          .then(function (r) {
+            busy(false); clearCache(); renderView();
+            if (!r.count) toast('ครูทุกคนมีรหัสผ่านแล้ว', 'ok');
+            else showCredentials('รหัสผ่านชั่วคราว ' + r.count + ' คน', r.accounts);
+          })
+          .catch(function (e) { busy(false); showError(e); });
+      }, 'สร้างรหัสผ่าน');
+  };
+
   var imp = document.getElementById('tImport');
   if (imp) imp.onclick = openImport;
+}
+
+/**
+ * แสดงชื่อผู้ใช้และรหัสผ่านชั่วคราวที่เพิ่งสร้าง — แสดงครั้งเดียว ระบบไม่ได้เก็บรหัสผ่านไว้
+ * accounts = [{ name, username, tempPassword }]
+ */
+function showCredentials(title, accounts) {
+  var list = accounts || [];
+  var text = 'ชื่อ\tชื่อผู้ใช้\tรหัสผ่านชั่วคราว\n' + list.map(function (a) {
+    return [a.name, a.username, a.tempPassword].join('\t');
+  }).join('\n');
+  var node = el('div', {});
+  node.innerHTML =
+    '<div class="alert alert-WARN">รหัสผ่านแสดงเพียงครั้งนี้ครั้งเดียว กรุณาคัดลอกหรือจดไว้ก่อนปิด ' +
+    'แล้วแจ้งครูแต่ละคน — ถ้าทำหายให้กด "รีเซ็ตรหัสผ่าน" ใหม่</div>' +
+    '<div class="table-wrap"><table class="tb"><thead><tr><th>ชื่อ</th><th>ชื่อผู้ใช้</th>' +
+    '<th>รหัสผ่านชั่วคราว</th></tr></thead><tbody>' +
+    list.map(function (a) {
+      return '<tr><td>' + esc(a.name) + '</td><td class="nowrap"><b>' + esc(a.username) + '</b></td>' +
+        '<td class="nowrap"><b>' + esc(a.tempPassword) + '</b></td></tr>';
+    }).join('') + '</tbody></table></div>' +
+    '<div class="field mt8"><label for="credText">คัดลอกไปวางใน Excel / Google Sheets</label>' +
+    '<textarea class="input cred-list" id="credText" readonly>' + esc(text) + '</textarea></div>';
+  modal({
+    title: title, node: node, sticky: true,
+    buttons: [
+      { label: 'คัดลอกทั้งหมด', onClick: function () { copyText('credText'); } },
+      { label: 'จดไว้แล้ว ปิด', kind: 'btn-primary', onClick: closeModal }
+    ]
+  });
+}
+
+function copyText(id) {
+  var t = document.getElementById(id);
+  if (!t) return;
+  t.focus();
+  t.select();
+  var copied = false;
+  try { copied = document.execCommand('copy'); } catch (e) { copied = false; }
+  toast(copied ? 'คัดลอกแล้ว' : 'เลือกข้อความแล้ว กด Ctrl+C หรือกดค้างแล้วเลือก "คัดลอก"', copied ? 'ok' : '');
+}
+
+/* ---------- บัญชีของฉัน ---------- */
+
+function openAccountMenu() {
+  var u = (App.boot && App.boot.user) || {};
+  var node = el('div', {});
+  node.innerHTML = '<div class="form-row">' +
+    '<div class="field"><label>ชื่อ</label><div>' + esc(u.name) + '</div></div>' +
+    '<div class="field"><label>ชื่อผู้ใช้</label><div>' + esc(u.username) + '</div></div>' +
+    '<div class="field"><label>บทบาท</label><div>' + esc(u.roleName) + '</div></div>' +
+    (u.department ? '<div class="field"><label>กลุ่มสาระ/ฝ่าย</label><div>' + esc(u.department) + '</div></div>' : '') +
+    '</div>';
+  modal({
+    title: 'บัญชีของฉัน', node: node,
+    buttons: [
+      { label: 'ปิด', onClick: closeModal },
+      { label: 'เปลี่ยนรหัสผ่าน', onClick: openChangePassword },
+      { label: 'ออกจากระบบ', kind: 'btn-danger', onClick: doLogout }
+    ]
+  });
+}
+
+function openChangePassword() {
+  var u = (App.boot && App.boot.user) || {};
+  var node = el('div', {});
+  node.innerHTML = '<form id="cpForm" novalidate>' +
+    '<input type="text" autocomplete="username" hidden value="' + esc(u.username) + '">' +
+    '<div class="field"><label for="cpCurrent">รหัสผ่านปัจจุบัน</label>' +
+    '<input class="input" id="cpCurrent" type="password" autocomplete="current-password" maxlength="128"></div>' +
+    '<div class="field"><label for="cpNew">รหัสผ่านใหม่</label>' +
+    '<input class="input" id="cpNew" type="password" autocomplete="new-password" maxlength="128"></div>' +
+    '<div class="field"><label for="cpConfirm">พิมพ์รหัสผ่านใหม่อีกครั้ง</label>' +
+    '<input class="input" id="cpConfirm" type="password" autocomplete="new-password" maxlength="128">' +
+    '<div class="hint">เปลี่ยนแล้ว เครื่องอื่นที่เข้าสู่ระบบด้วยบัญชีนี้ค้างไว้จะต้องเข้าสู่ระบบใหม่</div></div>' +
+    '<div id="cpErr"></div><button type="submit" hidden></button></form>';
+
+  function showProblem(msg) {
+    var box = document.getElementById('cpErr');
+    if (box) box.innerHTML = '<div class="alert alert-DANGER" style="white-space:pre-wrap">' + esc(msg) + '</div>';
+  }
+  function submit() {
+    var current = $('cpCurrent').value, next = $('cpNew').value;
+    var problem = passwordFormProblem(current, next, $('cpConfirm').value);
+    if (problem) return showProblem(problem);
+    busy(true);
+    call('auth.changePassword', { currentPassword: current, newPassword: next })
+      .then(function () { busy(false); closeModal(); toast('เปลี่ยนรหัสผ่านเรียบร้อย', 'ok'); })
+      .catch(function (e) { busy(false); showProblem(e.message); });
+  }
+
+  modal({
+    title: 'เปลี่ยนรหัสผ่าน', node: node,
+    buttons: [
+      { label: 'ยกเลิก', onClick: closeModal },
+      { label: 'บันทึกรหัสผ่านใหม่', kind: 'btn-primary', onClick: submit }
+    ]
+  });
+  var f = document.getElementById('cpForm');
+  if (f) f.onsubmit = function (e) { e.preventDefault(); submit(); };
+  setTimeout(function () { var c = document.getElementById('cpCurrent'); if (c) c.focus(); }, 50);
 }
 
 function openImport() {
@@ -872,7 +1024,8 @@ function openImport() {
         'บรรทัดแรกต้องเป็นหัวตาราง</p>' +
         '<div class="field"><label>ข้อมูลนำเข้า</label>' +
         '<textarea class="input" id="impText" style="min-height:150px">' + esc(t.text) + '</textarea>' +
-        '<div class="hint">คอลัมน์ที่จำเป็น: ชื่อ, นามสกุล, อีเมล</div></div>' +
+        '<div class="hint">คอลัมน์ที่จำเป็น: ชื่อ, นามสกุล · แนะนำให้มี ชื่อผู้ใช้ ' +
+        '(ถ้าว่าง ระบบใช้ส่วนหน้า @ ของอีเมลหรือรหัสครู) · รหัสผ่านว่าง = ระบบสร้างรหัสผ่านชั่วคราวให้</div></div>' +
         '<div id="impPreview"></div>';
 
       modal({
@@ -886,9 +1039,12 @@ function openImport() {
               call('teacher.importPreview', { text: document.getElementById('impText').value })
                 .then(function (p) {
                   busy(false);
+                  var pwLabel = { GIVEN: 'กรอกเอง', GENERATE: 'สร้างให้', KEEP: 'คงเดิม' };
                   var rows = p.rows.slice(0, 50).map(function (r) {
                     return '<tr><td class="small">' + r._line + '</td><td>' + esc(r.firstName + ' ' + r.lastName) + '</td>' +
-                      '<td class="small">' + esc(r.email) + '</td><td class="small">' + esc(r.department || '') + '</td>' +
+                      '<td class="small">' + esc(r.username || '') + '</td>' +
+                      '<td class="small">' + esc(pwLabel[r._passwordMode] || '') + '</td>' +
+                      '<td class="small">' + esc(r.department || '') + '</td>' +
                       '<td>' + (r._errors.length ? '<span class="tag tag-danger">' + esc(r._errors.join(', ')) + '</span>' :
                         '<span class="tag tag-ok">' + (r._mode === 'UPDATE' ? 'อัปเดต' : 'เพิ่มใหม่') + '</span>') + '</td></tr>';
                   }).join('');
@@ -896,7 +1052,8 @@ function openImport() {
                     '<div class="alert alert-INFO">ทั้งหมด ' + p.total + ' แถว · เพิ่มใหม่ ' + p.create +
                     ' · อัปเดต ' + p.update + ' · มีปัญหา ' + p.error + '</div>' +
                     '<div class="table-wrap"><table class="tb"><thead><tr><th>บรรทัด</th><th>ชื่อ</th>' +
-                    '<th>อีเมล</th><th>กลุ่มสาระ</th><th>ผล</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+                    '<th>ชื่อผู้ใช้</th><th>รหัสผ่าน</th><th>กลุ่มสาระ</th><th>ผล</th></tr></thead><tbody>' +
+                    rows + '</tbody></table></div>';
                   var foot = $('modalFoot');
                   if (!document.getElementById('impCommit') && (p.create + p.update) > 0) {
                     foot.appendChild(el('button', {
@@ -909,6 +1066,9 @@ function openImport() {
                             busy(false); closeModal(); clearCache();
                             toast('นำเข้าเรียบร้อย — เพิ่ม ' + r.created + ' · อัปเดต ' + r.updated, 'ok');
                             renderView();
+                            if (r.accounts && r.accounts.length) {
+                              showCredentials('รหัสผ่านชั่วคราวของครูที่นำเข้า', r.accounts);
+                            }
                           })
                           .catch(function (e) { busy(false); showError(e); });
                       }

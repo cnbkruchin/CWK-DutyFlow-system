@@ -5,6 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const crypto = require('crypto');
 
 const SRC = path.join(__dirname, '..', 'src');
 
@@ -46,23 +47,130 @@ function fmt(date, tz, pattern) {
 
 let uuidCounter = 0;
 
+/* ---------- ไบต์แบบ Java (มีเครื่องหมาย -128..127) ---------- */
+
+function toBuffer(v) {
+  if (typeof v === 'string') return Buffer.from(v, 'utf8');
+  return Buffer.from(Array.from(v, b => b & 0xff));
+}
+function toJavaBytes(buf) {
+  return Array.from(buf, b => (b > 127 ? b - 256 : b));
+}
+
+/* ---------- CacheService ในหน่วยความจำ ---------- */
+
+function makeCache(data) {
+  data._cache = data._cache || {};
+  const c = data._cache;
+  return {
+    get: k => (Object.prototype.hasOwnProperty.call(c, k) ? c[k] : null),
+    getAll: keys => {
+      const out = {};
+      keys.forEach(k => { if (Object.prototype.hasOwnProperty.call(c, k)) out[k] = c[k]; });
+      return out;
+    },
+    put: (k, v) => { c[k] = String(v); },
+    putAll: map => { Object.keys(map).forEach(k => { c[k] = String(map[k]); }); },
+    remove: k => { delete c[k]; },
+    removeAll: keys => { keys.forEach(k => { delete c[k]; }); }
+  };
+}
+
+/* ---------- สเปรดชีตจำลองในหน่วยความจำ (เปิดใช้เมื่อ store._sheets มีค่า) ---------- */
+
+function makeRange(sheet, r, c, nr, nc) {
+  const rows = sheet._rows;
+  const range = {
+    getValues: () => {
+      const out = [];
+      for (let i = 0; i < nr; i++) {
+        const row = rows[r - 1 + i] || [];
+        const vals = [];
+        for (let j = 0; j < nc; j++) {
+          const v = row[c - 1 + j];
+          vals.push(v === undefined ? '' : v);
+        }
+        out.push(vals);
+      }
+      return out;
+    },
+    setValues: vals => {
+      vals.forEach((v, i) => {
+        const idx = r - 1 + i;
+        while (rows.length <= idx) rows.push([]);
+        v.forEach((x, j) => { rows[idx][c - 1 + j] = x; });
+      });
+      return range;
+    },
+    setValue: v => range.setValues([[v]]),
+    clearContent: () => {
+      for (let i = 0; i < nr; i++) {
+        const row = rows[r - 1 + i];
+        if (row) for (let j = 0; j < nc; j++) row[c - 1 + j] = '';
+      }
+      return range;
+    }
+  };
+  ['setFontWeight', 'setBackground', 'setFontColor', 'setFontSize', 'setNumberFormat']
+    .forEach(m => { range[m] = () => range; });
+  return range;
+}
+
+function makeSheet(name) {
+  const sheet = { _rows: [] };
+  const hasContent = row => row && row.some(v => v !== '' && v !== undefined && v !== null);
+  Object.assign(sheet, {
+    getName: () => name,
+    getSheetId: () => 1,
+    getLastRow: () => {
+      for (let i = sheet._rows.length - 1; i >= 0; i--) if (hasContent(sheet._rows[i])) return i + 1;
+      return 0;
+    },
+    getLastColumn: () => sheet._rows.reduce((m, row) => Math.max(m, row ? row.length : 0), 0),
+    getRange: (r, c, nr, nc) => makeRange(sheet, r, c, nr || 1, nc || 1),
+    clear: () => { sheet._rows.length = 0; },
+    setFrozenRows: () => {},
+    autoResizeColumns: () => {}
+  });
+  return sheet;
+}
+
+function makeSpreadsheet(sheets) {
+  const ss = {
+    getId: () => 'ss-test',
+    getName: () => 'CWK DutyFlow Test',
+    getUrl: () => 'https://example.test/ss',
+    getSheetByName: n => sheets[n] || null,
+    insertSheet: n => { sheets[n] = makeSheet(n); return sheets[n]; }
+  };
+  return ss;
+}
+
 function makeSandbox(store) {
   const data = store || {};
 
+  // _quiet: ไม่พิมพ์ console.error จาก api() ที่ตั้งใจให้ล้มเหลวในการทดสอบ
+  const quietConsole = Object.assign({}, console, { error: () => {} });
+
   const sandbox = {
-    console,
+    console: data._quiet ? quietConsole : console,
     Math, Date, JSON, String, Number, Boolean, Array, Object, RegExp, Error, isNaN, parseInt, parseFloat,
     setTimeout, clearTimeout,
 
     Utilities: {
-      getUuid: () => 'uuid-' + (++uuidCounter).toString().padStart(6, '0'),
+      getUuid: () => 'uuid-' + (++uuidCounter).toString().padStart(6, '0') + '-' +
+        crypto.randomBytes(8).toString('hex'),
       formatDate: fmt,
       base64Decode: s => Buffer.from(s, 'base64'),
       base64Encode: b => Buffer.from(b).toString('base64'),
-      newBlob: (bytes, mime, name) => ({ bytes, mime, name })
+      newBlob: (bytes, mime, name) => ({ bytes, mime, name, getBytes: () => toJavaBytes(toBuffer(bytes)) }),
+      DigestAlgorithm: { SHA_256: 'sha256' },
+      computeDigest: (alg, value) => toJavaBytes(crypto.createHash(alg).update(toBuffer(value)).digest()),
+      computeHmacSha256Signature: (value, key) =>
+        toJavaBytes(crypto.createHmac('sha256', toBuffer(key)).update(toBuffer(value)).digest())
     },
 
-    Logger: { log: () => {} },
+    Logger: { log: m => { (data._logs = data._logs || []).push(String(m)); } },
 
     PropertiesService: {
       getScriptProperties: () => ({
@@ -72,22 +180,29 @@ function makeSandbox(store) {
     },
 
     CacheService: {
-      getScriptCache: () => ({
-        get: () => null, getAll: () => ({}), put: () => {}, putAll: () => {},
-        remove: () => {}, removeAll: () => {}
-      })
+      getScriptCache: () => makeCache(data)
     },
 
     LockService: {
       getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} })
     },
 
+    // _email = ผู้ที่รันอยู่ · _effectiveEmail = เจ้าของสคริปต์ (ผู้ Deploy)
     Session: {
       getActiveUser: () => ({ getEmail: () => data._email || '' }),
-      getEffectiveUser: () => ({ getEmail: () => data._email || '' })
+      getEffectiveUser: () => ({
+        getEmail: () => (data._effectiveEmail !== undefined ? data._effectiveEmail : data._email) || ''
+      })
     },
 
-    SpreadsheetApp: { openById: () => { throw new Error('no spreadsheet in test'); } },
+    SpreadsheetApp: {
+      openById: () => {
+        if (!data._sheets) throw new Error('no spreadsheet in test');
+        return makeSpreadsheet(data._sheets);
+      },
+      getActiveSpreadsheet: () => (data._sheets ? makeSpreadsheet(data._sheets) : null),
+      getUi: () => { throw new Error('no ui in test'); }
+    },
     DriveApp: { Access: {}, Permission: {} },
     DocumentApp: { Attribute: {}, ParagraphHeading: {} },
     MailApp: { sendEmail: () => {} },

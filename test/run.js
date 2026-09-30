@@ -226,15 +226,19 @@ ok('ลำดับสิทธิ์ถูกต้อง',
   G.ROLES.DAILY_HEAD.level > G.ROLES.TEACHER.level);
 
 section('9. การตรวจสิทธิ์');
-const ctxTeacher = { ok: true, role: 'TEACHER', level: 1, teacherId: 't1', roleName: 'ครู' };
-const ctxHead = { ok: true, role: 'DAILY_HEAD', level: 2, teacherId: 't2', roleName: 'หัวหน้าเวร' };
-const ctxAdmin = { ok: true, role: 'DUTY_ADMIN', level: 3, teacherId: 't3', roleName: 'หัวหน้างานเวร' };
+// ctx จริงสร้างโดยเซิร์ฟเวอร์และมี AUTH_SEAL เสมอ
+const seal = c => Object.assign({ _seal: G.AUTH_SEAL }, c);
+const ctxTeacher = seal({ ok: true, role: 'TEACHER', level: 1, teacherId: 't1', roleName: 'ครู' });
+const ctxHead = seal({ ok: true, role: 'DAILY_HEAD', level: 2, teacherId: 't2', roleName: 'หัวหน้าเวร' });
+const ctxAdmin = seal({ ok: true, role: 'DUTY_ADMIN', level: 3, teacherId: 't3', roleName: 'หัวหน้างานเวร' });
 throws('ครูเรียก requireAdmin ไม่ได้', () => G.AUTH_requireAdmin(ctxTeacher), 'สิทธิ์ไม่เพียงพอ');
 throws('หัวหน้าเวรเรียก requireAdmin ไม่ได้', () => G.AUTH_requireAdmin(ctxHead), 'สิทธิ์ไม่เพียงพอ');
 ok('หัวหน้างานเวรเรียก requireAdmin ได้', !!G.AUTH_requireAdmin(ctxAdmin));
 ok('หัวหน้าเวรเป็น reviewer ได้', !!G.AUTH_requireReviewer(ctxHead));
 throws('ครูไม่ใช่ reviewer', () => G.AUTH_requireReviewer(ctxTeacher), 'สิทธิ์ไม่เพียงพอ');
-throws('ผู้ไม่ผ่านการยืนยันตัวตน', () => G.AUTH_require({ ok: false, reason: 'ยังไม่เข้าสู่ระบบ' }), 'ยังไม่เข้าสู่ระบบ');
+throws('ผู้ไม่ผ่านการยืนยันตัวตน', () => G.AUTH_require(seal({ ok: false, reason: 'ยังไม่เข้าสู่ระบบ' })), 'ยังไม่เข้าสู่ระบบ');
+throws('ctx ที่ไม่ได้สร้างโดยเซิร์ฟเวอร์ถูกปฏิเสธ',
+  () => G.AUTH_requireAdmin({ ok: true, role: 'SYS_ADMIN', level: 5, roleName: 'ผู้ดูแลระบบ' }), 'กรุณาเข้าสู่ระบบ');
 eq('ครูไม่เห็นข้อมูลคนอื่น', G.AUTH_canSeeOthers(ctxTeacher), false);
 eq('หัวหน้าเวรเห็นข้อมูลคนอื่น', G.AUTH_canSeeOthers(ctxHead), true);
 ok('เมนูครูมี 2 รายการ', G.AUTH_menuFor(ctxTeacher).length === 2, JSON.stringify(G.AUTH_menuFor(ctxTeacher)));
@@ -405,7 +409,329 @@ eq('แปลงบทบาทภาษาไทย', G.TEACHER_normalizeRole_(
 eq('แปลงบทบาทผู้บริหาร', G.TEACHER_normalizeRole_('ผู้บริหาร'), 'EXECUTIVE');
 eq('แปลงบทบาทว่าง = ครู', G.TEACHER_normalizeRole_(''), 'TEACHER');
 eq('แปลงบทบาทอังกฤษ', G.TEACHER_normalizeRole_('SYS_ADMIN'), 'SYS_ADMIN');
-ok('ตัวอย่างไฟล์นำเข้ามีหัวตารางไทย', G.TEACHER_importTemplate().indexOf('อีเมล') >= 0);
+ok('ตัวอย่างไฟล์นำเข้ามีหัวตารางไทย', G.TEACHER_importTemplate().indexOf('ชื่อผู้ใช้') >= 0 &&
+  G.TEACHER_importTemplate().indexOf('รหัสผ่าน') >= 0);
+['session_timeout_min', 'login_max_attempts', 'login_lock_min', 'password_min_length',
+ 'password_force_change'].forEach(k => ok('มีค่าตั้งค่า ' + k, !!G.CFG_DEFAULTS[k]));
+
+/* ================= 20. รหัสผ่านและชื่อผู้ใช้ ================= */
+section('20. รหัสผ่านและชื่อผู้ใช้');
+const crypto = require('crypto');
+(function () {
+  const salt = '00112233445566778899aabbccddeeff';
+  const h = G.AUTH_hashPassword('ครูสมชาย#2569', salt, 1000);
+  const parts = h.split('$');
+  eq('รูปแบบ hash', parts.slice(0, 3), ['pbkdf2_sha256', '1000', salt]);
+  eq('ตรงกับ PBKDF2-HMAC-SHA256 มาตรฐาน (Node crypto)', parts[3],
+    crypto.pbkdf2Sync('ครูสมชาย#2569', Buffer.from(salt, 'hex'), 1000, 32, 'sha256').toString('hex'));
+  ok('รหัสผ่านถูกต้อง', G.AUTH_verifyPassword('ครูสมชาย#2569', h));
+  ok('รหัสผ่านผิด', !G.AUTH_verifyPassword('ครูสมชาย#2568', h));
+  ok('รหัสผ่านว่าง', !G.AUTH_verifyPassword('', h));
+  ok('hash เสีย', !G.AUTH_verifyPassword('x', 'garbage'));
+  ok('ไม่มี hash', !G.AUTH_verifyPassword('x', ''));
+  ok('hash ถูกแก้ไข', !G.AUTH_verifyPassword('ครูสมชาย#2569', h.slice(0, -1) + (h.slice(-1) === '0' ? '1' : '0')));
+  const a = G.AUTH_hashPassword('same-pass'), b = G.AUTH_hashPassword('same-pass');
+  ok('salt สุ่มทุกครั้ง', a !== b);
+  ok('ใช้จำนวนรอบค่าเริ่มต้น', a.split('$')[1] === String(G.AUTH_PW_ITER));
+  throws('ห้าม hash รหัสผ่านว่าง', () => G.AUTH_hashPassword(''), 'ว่าง');
+})();
+(function () {
+  const seen = new Set();
+  for (let i = 0; i < 30; i++) {
+    const p = G.AUTH_tempPassword_();
+    if (p.length < 8 || /[^abcdefghjkmnpqrstuvwxyz23456789]/.test(p)) {
+      ok('รหัสผ่านชั่วคราวรูปแบบถูกต้อง', false, p);
+      return;
+    }
+    seen.add(p);
+  }
+  ok('รหัสผ่านชั่วคราวยาว ≥ 8 และไม่มีตัวที่สับสน', true);
+  ok('รหัสผ่านชั่วคราวไม่ซ้ำกัน', seen.size === 30);
+})();
+eq('ชื่อผู้ใช้ถูกต้อง', G.AUTH_usernameProblem('somchai.j'), '');
+eq('ชื่อผู้ใช้แปลงเป็นตัวเล็กและตัดช่องว่าง', G.AUTH_normalizeUsername('  SomChai '), 'somchai');
+ok('ชื่อผู้ใช้สั้นเกิน', G.AUTH_usernameProblem('ab') !== '');
+ok('ชื่อผู้ใช้ภาษาไทยไม่ได้', G.AUTH_usernameProblem('สมชาย') !== '');
+ok('ชื่อผู้ใช้ขึ้นต้นด้วยตัวเลขไม่ได้ (ชีตจะแปลงเป็นตัวเลข)', G.AUTH_usernameProblem('001') !== '');
+ok('ชื่อผู้ใช้มีช่องว่างไม่ได้', G.AUTH_usernameProblem('som chai') !== '');
+ok('ชื่อผู้ใช้ว่างไม่ได้', G.AUTH_usernameProblem('') !== '');
+eq('รหัสผ่านผ่านนโยบาย', G.AUTH_passwordProblems('abc123', 'somchai'), []);
+eq('รหัสผ่านสั้นเกิน', G.AUTH_passwordProblems('abc', 'somchai').length, 1);
+eq('รหัสผ่านเหมือนชื่อผู้ใช้', G.AUTH_passwordProblems('Somchai', 'somchai').length, 1);
+eq('รหัสผ่านมีช่องว่างท้าย', G.AUTH_passwordProblems('abc123 ', 'x').length, 1);
+eq('แนะนำชื่อผู้ใช้จากอีเมล', G.TEACHER_suggestUsername_({ email: 'Somchai.J@school.ac.th', code: 'T001' }), 'somchai.j');
+eq('แนะนำชื่อผู้ใช้จากรหัสครู', G.TEACHER_suggestUsername_({ email: '', code: 'T001' }), 't001');
+eq('รหัสครูเป็นตัวเลขเติม t นำหน้า', G.TEACHER_suggestUsername_({ code: '0042' }), 't0042');
+eq('ชื่อผู้ใช้ซ้ำเติมตัวเลขต่อท้าย', G.TEACHER_uniqueUsername_('somchai', { somchai: true, somchai2: true }), 'somchai3');
+ok('ประวัติไม่เก็บ password_hash', (function () {
+  const v = G.TEACHER_auditView_({ id: 'x', username: 'a', password_hash: 'pbkdf2_sha256$1$aa$bb' });
+  return v.password_hash === undefined && v.password_set === true && v.username === 'a';
+})());
+
+/* ================= 21. กันการเรียกฟังก์ชันโดยตรง ================= */
+section('21. กันการเรียกฟังก์ชันฝั่ง Server โดยตรงจากหน้าเว็บ');
+(function () {
+  // ผู้เยี่ยมชมเว็บแอปที่ไม่ได้ลงชื่อเข้า Google: อ่านอีเมลไม่ได้ ส่วนสคริปต์รันในนามเจ้าของ
+  const W = loadAll({ _props: { SPREADSHEET_ID: 'x' }, _sheets: {}, _email: '', _effectiveEmail: 'owner@school.test', _quiet: true });
+  throws('อ่านตารางโดยตรงไม่ได้', () => W.dbReadAll('TEACHERS'), 'ไม่อนุญาต');
+  throws('เขียนตารางโดยตรงไม่ได้', () => W.dbUpdate('TEACHERS', 'x', { role: 'SYS_ADMIN' }), 'ไม่อนุญาต');
+  throws('อ่าน Script Properties ไม่ได้', () => W.PROP_get('SPREADSHEET_ID'), 'ไม่อนุญาต');
+  throws('เขียนแคชโดยตรงไม่ได้', () => W.CACHE_put('sess:x', {}), 'ไม่อนุญาต');
+  const forged = { ok: true, role: 'SYS_ADMIN', level: 5, teacherId: 'x', roleName: 'ผู้ดูแลระบบ' };
+  throws('ctx ปลอมเรียกบริการไม่ได้', () => W.TEACHER_save(forged, { firstName: 'a' }), 'กรุณาเข้าสู่ระบบ');
+  throws('ctx ปลอมดูภาพไม่ได้', () => W.PHOTO_data(forged, 'x'), 'กรุณาเข้าสู่ระบบ');
+  throws('ผู้เยี่ยมชมรัน ติดตั้งระบบ ไม่ได้', () => W['ติดตั้งระบบ'](), 'เจ้าของสคริปต์');
+  throws('ผู้เยี่ยมชมรีเซ็ตรหัสผ่านผู้ดูแลไม่ได้', () => W['รีเซ็ตรหัสผ่านผู้ดูแลระบบ'](), 'เจ้าของสคริปต์');
+  throws('ผู้เยี่ยมชมซ่อมข้อมูลไม่ได้', () => W['ซ่อมข้อมูล'](), 'เจ้าของสคริปต์');
+  throws('ผู้เยี่ยมชมล้างแคชไม่ได้', () => W['ล้างแคช'](), 'เจ้าของสคริปต์');
+
+  const r = W.api('teacher.list', {}, '');
+  eq('api ต้องเข้าสู่ระบบก่อน', [r.ok, r.code], [false, 'AUTH_REQUIRED']);
+  const r2 = W.api('constructor', {}, '');
+  ok('ชื่อคำสั่งแปลก ๆ ไม่หลุดไปถึง Object', r2.ok === false && /ไม่รู้จักคำสั่ง/.test(r2.error), r2.error);
+  const b = W.api('bootstrap', {}, '');
+  ok('bootstrap แจ้งให้เข้าสู่ระบบ', b.ok && b.data.authorized === false && b.data.loginRequired === true);
+  ok('bootstrap ก่อนเข้าสู่ระบบไม่มีข้อมูลผู้ใช้', !b.data.user && !b.data.menu);
+  const bad = W.api('bootstrap', {}, 'f'.repeat(64));
+  eq('token ปลอมถือว่าหมดอายุ', bad.data.reasonCode, 'SESSION_EXPIRED');
+})();
+(function () {
+  const store = { _props: {}, _email: '', _effectiveEmail: 'owner@school.test' };
+  eq('งานอัตโนมัติที่ถูกเรียกจากภายนอกทำได้ครั้งแรกของวัน', loadAll(store).EXEC_beginJob_('REMIND'), true);
+  eq('ถูกเรียกซ้ำในวันเดียวกันไม่ทำงาน', loadAll(store).EXEC_beginJob_('REMIND'), false);
+  store._email = 'owner@school.test';
+  eq('เจ้าของสคริปต์ (ทริกเกอร์) ทำงานได้เสมอ', loadAll(store).EXEC_beginJob_('REMIND'), true);
+})();
+
+/* ================= 22. เข้าสู่ระบบครบวงจร ================= */
+section('22. เข้าสู่ระบบด้วยชื่อผู้ใช้และรหัสผ่าน (ครบวงจร)');
+
+/** ระบบจำลองบนสเปรดชีตในหน่วยความจำ — ทุกคำขอโหลดโค้ดใหม่เหมือนการประมวลผลจริงของ Apps Script */
+function makeSystem(sheets) {
+  const store = { _props: { PHOTO_FOLDER_ID: 'p', REPORT_FOLDER_ID: 'r' }, _sheets: sheets || {}, _email: 'owner@school.test', _quiet: true };
+  const fresh = () => loadAll(store);
+  return {
+    store, fresh,
+    api: (a, p, t) => fresh().api(a, p || {}, t || ''),
+    rows: table => { const S = fresh(); S.EXEC_trust_(); return S.dbReadAll(table); },
+    login: function (u, p) { const r = this.api('auth.login', { username: u, password: p }); return r.ok ? r.data.token : ''; }
+  };
+}
+function credsOf(msg) {
+  const m = /ชื่อผู้ใช้: (\S+)[\s\S]*รหัสผ่านชั่วคราว: (\S+)/.exec(msg);
+  return m ? { username: m[1], password: m[2] } : null;
+}
+
+(function () {
+  const sys = makeSystem();
+  const api = sys.api;
+  const setupMsg = sys.fresh()['ติดตั้งระบบ']();
+  const admin = credsOf(setupMsg);
+  ok('ติดตั้งระบบสร้างบัญชีผู้ดูแลพร้อมรหัสผ่านชั่วคราว', !!admin, setupMsg);
+  if (!admin) return;
+  eq('ชื่อผู้ใช้ผู้ดูแลเริ่มต้น', admin.username, 'admin');
+  const adminRow = sys.rows('TEACHERS').find(t => t.username === 'admin');
+  ok('เก็บรหัสผ่านเป็น hash เท่านั้น', adminRow && /^pbkdf2_sha256\$/.test(adminRow.password_hash) &&
+    adminRow.password_hash.indexOf(admin.password) < 0);
+  ok('ผู้ดูแลต้องตั้งรหัสผ่านใหม่ครั้งแรก', adminRow && adminRow.must_change_password === 'TRUE');
+  ok('รันติดตั้งซ้ำไม่สร้างผู้ดูแลเพิ่ม', /มีผู้ดูแลระบบที่เข้าสู่ระบบได้แล้ว/.test(sys.fresh()['ติดตั้งระบบ']()) &&
+    sys.rows('TEACHERS').length === 1);
+
+  let r = api('auth.login', { username: 'admin', password: 'wrong-pass' });
+  eq('รหัสผ่านผิด', [r.ok, r.code], [false, 'LOGIN_FAILED']);
+  ok('ข้อความไม่บอกว่าผิดที่ชื่อผู้ใช้หรือรหัสผ่าน', /ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง/.test(r.error), r.error);
+  r = api('auth.login', { username: 'nobody', password: 'wrong-pass' });
+  ok('ชื่อผู้ใช้ที่ไม่มีอยู่ได้ข้อความเดียวกัน', /ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง/.test(r.error), r.error);
+  r = api('auth.login', { username: 'admin', password: '' });
+  ok('ไม่กรอกรหัสผ่าน', !r.ok && /กรุณากรอก/.test(r.error));
+
+  r = api('auth.login', { username: ' ADMIN ', password: admin.password });
+  ok('เข้าสู่ระบบสำเร็จ (ไม่สนตัวพิมพ์ใหญ่และช่องว่าง)', r.ok, r.error);
+  if (!r.ok) return;
+  const tok = r.data.token;
+  ok('token สุ่มยาว 64 ตัว', /^[0-9a-f]{64}$/.test(tok));
+  eq('ข้อมูลผู้ใช้หลังเข้าสู่ระบบ',
+    [r.data.boot.authorized, r.data.boot.user.username, r.data.boot.user.role, r.data.boot.user.mustChangePassword],
+    [true, 'admin', 'SYS_ADMIN', true]);
+
+  r = api('teacher.list', {}, tok);
+  eq('ต้องตั้งรหัสผ่านใหม่ก่อนใช้งาน', r.code, 'MUST_CHANGE_PASSWORD');
+  r = api('auth.changePassword', { currentPassword: 'nope', newPassword: 'Admin#2569' }, tok);
+  ok('รหัสผ่านปัจจุบันผิด', !r.ok && /ปัจจุบันไม่ถูกต้อง/.test(r.error), r.error);
+  r = api('auth.changePassword', { currentPassword: admin.password, newPassword: '123' }, tok);
+  ok('รหัสผ่านใหม่สั้นเกิน', !r.ok && /อย่างน้อย 6/.test(r.error), r.error);
+  r = api('auth.changePassword', { currentPassword: admin.password, newPassword: admin.password }, tok);
+  ok('รหัสผ่านใหม่ซ้ำรหัสเดิม', !r.ok && /ไม่ซ้ำกับรหัสผ่านเดิม/.test(r.error), r.error);
+  r = api('auth.changePassword', { currentPassword: admin.password, newPassword: 'Admin#2569' }, tok);
+  ok('เปลี่ยนรหัสผ่านสำเร็จ', r.ok, r.error);
+  r = api('teacher.list', {}, tok);
+  ok('เซสชันเดิมใช้ต่อได้หลังเปลี่ยนรหัสผ่าน', r.ok, r.error);
+  ok('รายชื่อครูไม่ส่ง hash ออกไป', r.ok && JSON.stringify(r.data).indexOf('pbkdf2') < 0);
+  ok('ใช้รหัสผ่านชั่วคราวเดิมไม่ได้แล้ว', !sys.login('admin', admin.password));
+  const otherTok = sys.login('admin', 'Admin#2569');
+  ok('เข้าด้วยรหัสผ่านใหม่ได้', !!otherTok);
+
+  // ผู้ดูแลเพิ่มครู
+  r = api('teacher.save', { firstName: 'สมชาย', lastName: 'ใจดี', username: 'SomChai', role: 'TEACHER' }, tok);
+  ok('เพิ่มครูโดยไม่กรอกรหัสผ่านได้รหัสผ่านชั่วคราว', r.ok && !!r.data.tempPassword && r.data.username === 'somchai', r.error);
+  const somId = r.data.id, somTemp = r.data.tempPassword;
+  r = api('teacher.save', { firstName: 'ซ้ำ', lastName: 'ซ้ำ', username: 'somchai' }, tok);
+  ok('ชื่อผู้ใช้ซ้ำถูกปฏิเสธ', !r.ok && /ถูกใช้แล้ว/.test(r.error), r.error);
+  r = api('teacher.save', { firstName: 'ไม่มี', lastName: 'ชื่อผู้ใช้' }, tok);
+  ok('ต้องกรอกชื่อผู้ใช้', !r.ok && /กรุณากรอกชื่อผู้ใช้/.test(r.error), r.error);
+  r = api('teacher.save', { firstName: 'สมหญิง', lastName: 'ตั้งใจ', username: 'somying', password: 'Somying#1', role: 'DAILY_HEAD' }, tok);
+  ok('เพิ่มครูพร้อมกำหนดรหัสผ่านเอง', r.ok && !r.data.tempPassword, r.error);
+  r = api('teacher.get', { id: somId }, tok);
+  ok('แก้ไขครูโดยไม่ส่งรหัสผ่าน รหัสเดิมยังอยู่', (function () {
+    const d = r.data;
+    const u = api('teacher.save', { id: d.id, firstName: d.firstName, lastName: d.lastName, username: d.username,
+      department: 'คณิตศาสตร์', role: d.role, status: d.status }, tok);
+    return u.ok && !!sys.login('somchai', somTemp);
+  })());
+
+  // ครูเข้าสู่ระบบด้วยรหัสผ่านชั่วคราวแล้วตั้งรหัสใหม่
+  r = api('auth.login', { username: 'somchai', password: somTemp });
+  ok('ครูเข้าด้วยรหัสผ่านชั่วคราว', r.ok && r.data.boot.user.mustChangePassword === true, r.error);
+  let tTok = r.data.token;
+  r = api('auth.changePassword', { currentPassword: somTemp, newPassword: 'SOMCHAI' }, tTok);
+  ok('รหัสผ่านต้องไม่เหมือนชื่อผู้ใช้', !r.ok && /ไม่เหมือนชื่อผู้ใช้/.test(r.error), r.error);
+  r = api('auth.changePassword', { currentPassword: somTemp, newPassword: 'Duty2569' }, tTok);
+  ok('ครูตั้งรหัสผ่านใหม่', r.ok, r.error);
+  r = api('bootstrap', {}, tTok);
+  eq('ครูเห็นเมนูตามบทบาทเดิม', r.data.menu.map(x => x.key), ['today', 'mine']);
+  r = api('teacher.save', { firstName: 'x', lastName: 'y', username: 'hacker', role: 'SYS_ADMIN' }, tTok);
+  ok('ครูเพิ่มบัญชีไม่ได้', !r.ok && /สิทธิ์ไม่เพียงพอ/.test(r.error), r.error);
+  r = api('teacher.resetPassword', { id: adminRow.id }, tTok);
+  ok('ครูรีเซ็ตรหัสผ่านคนอื่นไม่ได้', !r.ok && /สิทธิ์ไม่เพียงพอ/.test(r.error), r.error);
+
+  // หัวหน้าเวรยังได้สิทธิ์ระดับเดิม
+  const hTok = sys.login('somying', 'Somying#1');
+  api('auth.changePassword', { currentPassword: 'Somying#1', newPassword: 'Head#2569' }, hTok);
+  r = api('bootstrap', {}, hTok);
+  ok('หัวหน้าเวรเห็นเมนูจัดเวรและอนุมัติ', r.ok && ['assign', 'approve', 'report'].every(k => r.data.menu.some(m => m.key === k)));
+  ok('หัวหน้าเวรไม่เห็นเมนูตั้งค่า', r.ok && !r.data.menu.some(m => m.key === 'settings'));
+
+  // ผู้ดูแลรีเซ็ตรหัสผ่าน → เซสชันเดิมของครูหมดอายุทันที
+  r = api('teacher.resetPassword', { id: somId }, tok);
+  ok('ผู้ดูแลรีเซ็ตรหัสผ่านครู', r.ok && !!r.data.tempPassword, r.error);
+  const somTemp2 = r.data.tempPassword;
+  r = api('bootstrap', {}, tTok);
+  eq('เซสชันเดิมของครูหมดอายุหลังรีเซ็ต', r.data.reasonCode, 'PASSWORD_CHANGED');
+  r = api('schedule.mine', {}, tTok);
+  eq('คำสั่งอื่นก็ถูกปฏิเสธ', r.code, 'AUTH_REQUIRED');
+  r = api('teacher.resetPassword', { id: adminRow.id }, tok);
+  ok('รีเซ็ตรหัสผ่านของตนเองผ่านหน้านี้ไม่ได้', !r.ok && /ของตนเอง/.test(r.error), r.error);
+
+  // พักบัญชีเมื่อใส่รหัสผ่านผิดหลายครั้ง
+  for (let i = 0; i < 5; i++) api('auth.login', { username: 'somchai', password: 'bad-pass-' + i });
+  r = api('auth.login', { username: 'somchai', password: somTemp2 });
+  eq('ใส่ผิดครบ 5 ครั้งถูกพักบัญชีแม้รหัสถูก', r.code, 'LOCKED');
+  r = api('teacher.resetPassword', { id: somId }, tok);
+  const somTemp3 = r.data.tempPassword;
+  tTok = sys.login('somchai', somTemp3);
+  ok('รีเซ็ตรหัสผ่านแล้วปลดการพักบัญชี', !!tTok);
+
+  // ระงับบัญชี
+  r = api('teacher.status', { id: somId, status: 'INACTIVE' }, tok);
+  ok('ระงับครู', r.ok, r.error);
+  r = api('bootstrap', {}, tTok);
+  eq('บัญชีที่ถูกระงับหลุดจากระบบทันที', r.data.reasonCode, 'INACTIVE');
+  r = api('auth.login', { username: 'somchai', password: somTemp3 });
+  ok('บัญชีที่ถูกระงับเข้าสู่ระบบไม่ได้', !r.ok && /ระงับ/.test(r.error), r.error);
+
+  // ออกจากระบบ
+  r = api('auth.logout', {}, tok);
+  ok('ออกจากระบบ', r.ok, r.error);
+  r = api('teacher.list', {}, tok);
+  eq('token ใช้ไม่ได้หลังออกจากระบบ', r.code, 'AUTH_REQUIRED');
+  r = api('teacher.list', {}, otherTok);
+  ok('ออกจากระบบเครื่องหนึ่งไม่กระทบอีกเครื่อง', r.ok, r.error);
+
+  // ประวัติการใช้งาน
+  const audit = sys.rows('AUDIT_LOG');
+  const auditJson = JSON.stringify(audit);
+  ok('บันทึกการเข้าสู่ระบบพร้อมชื่อผู้ใช้', audit.some(a => a.action === 'LOGIN' && a.actor_username === 'admin'));
+  ok('บันทึกการใส่รหัสผ่านผิด', audit.some(a => a.action === 'LOGIN_FAILED'));
+  ok('บันทึกการรีเซ็ตรหัสผ่าน', audit.some(a => a.action === 'PASSWORD_RESET'));
+  ok('AUDIT_LOG ไม่มี hash หรือรหัสผ่าน', auditJson.indexOf('pbkdf2') < 0 &&
+    [admin.password, 'Admin#2569', somTemp, somTemp3, 'Somying#1'].every(p => auditJson.indexOf(p) < 0));
+})();
+
+/* ================= 23. นำเข้าครูหลายรายการ ================= */
+section('23. นำเข้าครูพร้อมชื่อผู้ใช้/รหัสผ่าน');
+(function () {
+  const sys = makeSystem();
+  const admin = credsOf(sys.fresh()['ติดตั้งระบบ']());
+  const t0 = sys.login(admin.username, admin.password);
+  sys.api('auth.changePassword', { currentPassword: admin.password, newPassword: 'Admin#2569' }, t0);
+
+  const csv = 'รหัส,ชื่อ,นามสกุล,ชื่อผู้ใช้,รหัสผ่าน,กลุ่มสาระ,อีเมล\n' +
+    'T001,สมชาย,ใจดี,somchai,Somchai#1,วิทย์,\n' +
+    'T002,สมหญิง,ตั้งใจ,,,ไทย,somying@school.ac.th\n' +
+    'T003,สมศักดิ์,มั่นคง,somsak,,คณิต,\n' +
+    'T004,ซ้ำ,ซ้ำ,somchai,,คณิต,\n' +
+    'T005,รหัส,สั้น,shortpw,abc,คณิต,\n';
+  let r = sys.api('teacher.importPreview', { text: csv }, t0);
+  ok('ตรวจข้อมูลนำเข้า', r.ok, r.error);
+  eq('สรุปผลตรวจ', [r.data.total, r.data.create, r.data.error], [5, 3, 2]);
+  eq('ตั้งชื่อผู้ใช้จากอีเมลเมื่อเว้นว่าง', r.data.rows[1].username, 'somying');
+  ok('ผลตรวจไม่ส่งรหัสผ่านกลับไป', JSON.stringify(r.data).indexOf('Somchai#1') < 0);
+  ok('แจ้งชื่อผู้ใช้ซ้ำในไฟล์', r.data.rows[3]._errors.some(e => /ซ้ำกับบรรทัดที่ 2/.test(e)));
+  ok('แจ้งรหัสผ่านสั้นเกิน', r.data.rows[4]._errors.some(e => /อย่างน้อย/.test(e)));
+
+  r = sys.api('teacher.importCommit', { text: csv }, t0);
+  ok('นำเข้าสำเร็จ', r.ok && r.data.created === 3, r.error);
+  eq('ได้รหัสผ่านชั่วคราวเฉพาะคนที่ไม่ได้กรอก', r.data.accounts.map(a => a.username).sort(), ['somsak', 'somying']);
+  ok('ครูที่กรอกรหัสผ่านเองเข้าสู่ระบบได้', !!sys.login('somchai', 'Somchai#1'));
+  const sy = r.data.accounts.find(a => a.username === 'somying');
+  ok('ครูที่ได้รหัสผ่านชั่วคราวเข้าสู่ระบบได้', !!sys.login('somying', sy.tempPassword));
+
+  // นำเข้าไฟล์แบบเดิม (มีแต่อีเมล) ต้องอัปเดตคนเดิม ไม่สร้างซ้ำ
+  const oldCsv = 'รหัส,ชื่อ,นามสกุล,อีเมล,กลุ่มสาระ\nT002,สมหญิง,ตั้งใจดี,somying@school.ac.th,ภาษาไทย\n';
+  r = sys.api('teacher.importCommit', { text: oldCsv }, t0);
+  ok('ไฟล์แบบเดิมอัปเดตครูคนเดิม', r.ok && r.data.updated === 1 && r.data.created === 0, r.error || JSON.stringify(r.data));
+  ok('อัปเดตแล้วรหัสผ่านเดิมยังใช้ได้', !!sys.login('somying', sy.tempPassword) && r.data.accounts.length === 0);
+})();
+
+/* ================= 24. ย้ายจากระบบเดิม ================= */
+section('24. ย้ายข้อมูลจากระบบเดิมที่เข้าด้วยอีเมล');
+(function () {
+  const sys = makeSystem();
+  // ชีต TEACHERS แบบเดิม — ยังไม่มีคอลัมน์ชื่อผู้ใช้และรหัสผ่าน
+  const oldCols = ['id', 'code', 'prefix', 'first_name', 'last_name', 'email', 'department',
+    'position', 'phone', 'role', 'status', 'note', 'created_at', 'updated_at'];
+  const ss = sys.fresh().SpreadsheetApp.getActiveSpreadsheet();
+  ss.insertSheet('TEACHERS').getRange(1, 1, 4, oldCols.length).setValues([
+    oldCols,
+    ['t-dir', 'D01', 'นาย', 'ผู้อำนวย', 'การ', 'director@school.ac.th', 'บริหาร', 'ผอ.', '', 'SYS_ADMIN', 'ACTIVE', '', '', ''],
+    ['t-som', 'T001', 'นาย', 'สมชาย', 'ใจดี', 'somchai@school.ac.th', 'วิทย์', 'ครู', '', 'DAILY_HEAD', 'ACTIVE', '', '', ''],
+    ['t-num', '0042', 'นาง', 'สมใจ', 'รักดี', '', 'ไทย', 'ครู', '', 'TEACHER', 'ACTIVE', '', '', '']
+  ]);
+
+  const msg = sys.fresh()['ติดตั้งระบบ']();
+  const admin = credsOf(msg);
+  ok('ผู้ดูแลระบบเดิมได้รหัสผ่านชั่วคราว (ไม่สร้างบัญชีใหม่)', admin && admin.username === 'director', msg);
+  const rows = sys.rows('TEACHERS');
+  eq('ครูเดิมได้ชื่อผู้ใช้จากอีเมล/รหัสครู', rows.map(t => t.username), ['director', 'somchai', 't0042']);
+  eq('ข้อมูลเดิมไม่หาย', rows.map(t => [t.email, t.role]),
+    [['director@school.ac.th', 'SYS_ADMIN'], ['somchai@school.ac.th', 'DAILY_HEAD'], ['', 'TEACHER']]);
+  eq('ไม่มีการสร้างครูเพิ่ม', rows.length, 3);
+
+  const tok = sys.login('director', admin.password);
+  ok('ผู้ดูแลระบบเดิมเข้าสู่ระบบได้', !!tok);
+  sys.api('auth.changePassword', { currentPassword: admin.password, newPassword: 'Director#1' }, tok);
+  let r = sys.api('teacher.issuePasswords', {}, tok);
+  ok('ออกรหัสผ่านชั่วคราวให้ครูที่ยังไม่มี', r.ok && r.data.count === 2, r.error || JSON.stringify(r.data));
+  const som = r.ok && r.data.accounts.find(a => a.username === 'somchai');
+  ok('ครูเดิมเข้าสู่ระบบด้วยรหัสผ่านชั่วคราว', !!(som && sys.login('somchai', som.tempPassword)));
+  r = sys.api('teacher.issuePasswords', {}, tok);
+  eq('ออกซ้ำไม่กระทบคนที่มีรหัสผ่านแล้ว', r.ok && r.data.count, 0);
+
+  const lost = credsOf(sys.fresh()['รีเซ็ตรหัสผ่านผู้ดูแลระบบ']());
+  ok('เจ้าของสคริปต์กู้รหัสผ่านผู้ดูแลระบบได้', !!(lost && lost.username === 'director' && sys.login('director', lost.password)));
+  r = sys.api('teacher.list', {}, tok);
+  eq('รหัสผ่านที่กู้คืนทำให้เซสชันเดิมหมดอายุ', r.code, 'AUTH_REQUIRED');
+})();
 
 /* ================= สรุปผล ================= */
 console.log('\n' + '─'.repeat(60));

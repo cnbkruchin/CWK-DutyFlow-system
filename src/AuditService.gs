@@ -12,6 +12,7 @@ function AUDIT_log(ctx, action, entity, entityId, before, after, note) {
     ts: nowIso(),
     actor_id: (ctx && ctx.teacherId) || '',
     actor_email: (ctx && ctx.email) || '',
+    actor_username: (ctx && ctx.username) || '',
     actor_role: (ctx && ctx.role) || '',
     action: str(action),
     entity: str(entity),
@@ -49,9 +50,11 @@ function AUDIT_search(ctx, opts) {
     if (o.action && str(r.action) !== o.action) return false;
     if (o.entity && str(r.entity) !== o.entity) return false;
     if (o.actorEmail && str(r.actor_email) !== str(o.actorEmail)) return false;
+    if (o.actorUsername && str(r.actor_username) !== str(o.actorUsername)) return false;
     if (o.q) {
       var q = str(o.q).toLowerCase();
-      var hay = (str(r.action) + str(r.entity) + str(r.entity_id) + str(r.actor_email) + str(r.note)).toLowerCase();
+      var hay = (str(r.action) + str(r.entity) + str(r.entity_id) + str(r.actor_username) +
+        str(r.actor_email) + str(r.note)).toLowerCase();
       if (hay.indexOf(q) < 0) return false;
     }
     return true;

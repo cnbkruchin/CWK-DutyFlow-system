@@ -6,6 +6,8 @@
  *  - อ่าน/เขียนแบบยกชุด (getValues/setValues) ห้าม appendRow ในลูป
  *  - แคช 3 ชั้น: DB_MEM (ต่อการเรียก 1 ครั้ง) -> CacheService -> อ่านชีต
  *  - ห้ามลบข้อมูลสำคัญถาวร ใช้การเปลี่ยนสถานะแทน
+ *  - เพิ่มคอลัมน์ใหม่ต่อท้ายเสมอ ชีตเดิมจะอ่านได้ถูกต้องแม้ยังไม่ได้รัน ติดตั้งระบบ()
+ *  - ทุกการเข้าถึงข้อมูลต้องผ่าน EXEC_assert_() (ดู AuthService.gs)
  */
 
 var DB_SCHEMA = {
@@ -18,7 +20,8 @@ var DB_SCHEMA = {
   TEACHERS: {
     sheet: 'TEACHERS', cache: true,
     columns: ['id', 'code', 'prefix', 'first_name', 'last_name', 'email', 'department',
-      'position', 'phone', 'role', 'status', 'note', 'created_at', 'updated_at']
+      'position', 'phone', 'role', 'status', 'note', 'created_at', 'updated_at',
+      'username', 'password_hash', 'must_change_password', 'password_changed_at']
   },
 
   DUTY_POINTS: {
@@ -97,7 +100,7 @@ var DB_SCHEMA = {
   AUDIT_LOG: {
     sheet: 'AUDIT_LOG', cache: false,
     columns: ['id', 'ts', 'actor_id', 'actor_email', 'actor_role', 'action',
-      'entity', 'entity_id', 'before_json', 'after_json', 'note']
+      'entity', 'entity_id', 'before_json', 'after_json', 'note', 'actor_username']
   }
 };
 
@@ -114,6 +117,7 @@ var DB_STATS = { sheetReads: 0, memHits: 0, cacheHits: 0 };
 var DB_SS_ = null;
 
 function DB_ss() {
+  EXEC_assert_();
   if (DB_SS_) return DB_SS_;
   var id = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
   if (!id) throw new Error('ยังไม่ได้ตั้งค่า SPREADSHEET_ID ใน Script Properties — กรุณารัน ติดตั้งระบบ() ก่อน');
@@ -140,6 +144,7 @@ var DB_MAX_CHUNKS = 20;
 function DB_cacheKey_(table) { return 'db:v2:' + table; }
 
 function CACHE_get(key) {
+  EXEC_assert_();
   try {
     var c = CacheService.getScriptCache();
     var head = c.get(key);
@@ -162,6 +167,7 @@ function CACHE_get(key) {
 }
 
 function CACHE_put(key, value) {
+  EXEC_assert_();
   try {
     var json = JSON.stringify(value);
     var n = Math.ceil(json.length / DB_CHUNK);
@@ -178,6 +184,7 @@ function CACHE_put(key, value) {
 }
 
 function CACHE_remove(key) {
+  EXEC_assert_();
   try {
     var c = CacheService.getScriptCache();
     var head = c.get(key);
@@ -221,6 +228,7 @@ function DB_clone_(o) {
 function dbReadAll(table, useCache) {
   var def = DB_SCHEMA[table];
   if (!def) throw new Error('ไม่รู้จักตาราง: ' + table);
+  EXEC_assert_();
 
   if (DB_MEM[table]) { DB_STATS.memHits++; return DB_MEM[table]; }
 

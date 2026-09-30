@@ -2,6 +2,7 @@
  * Setup.gs — ติดตั้งระบบ สร้างชีต และตัวช่วยตั้งค่าเริ่มต้น
  *
  * เรียกจากเมนูในตัวแก้ไข Apps Script: ติดตั้งระบบ()
+ * คำสั่งในไฟล์นี้ที่ชื่อเป็นภาษาไทยใช้ได้เฉพาะเจ้าของสคริปต์ (AUTH_ownerOnly_)
  */
 
 /** เมนูในสเปรดชีต */
@@ -13,6 +14,7 @@ function onOpen() {
       .addItem('ตรวจสอบระบบ', 'ตรวจสอบระบบ')
       .addItem('ซ่อมข้อมูลที่เชื่อมไม่ติด', 'ซ่อมข้อมูล')
       .addItem('ล้างแคชทั้งหมด', 'ล้างแคช')
+      .addItem('รีเซ็ตรหัสผ่านผู้ดูแลระบบ', 'รีเซ็ตรหัสผ่านผู้ดูแลระบบ')
       .addSeparator()
       .addItem('ใส่ข้อมูลตัวอย่าง', 'ใส่ข้อมูลตัวอย่าง')
       .addToUi();
@@ -21,9 +23,11 @@ function onOpen() {
 
 /**
  * ติดตั้งระบบ — สร้างชีตที่ขาด เติมคอลัมน์ที่ขาด ตั้ง Script Properties
+ * และสร้างบัญชีผู้ดูแลระบบพร้อมรหัสผ่านชั่วคราว ถ้ายังไม่มีผู้ดูแลที่เข้าสู่ระบบได้
  * รันซ้ำได้ ข้อมูลเดิมไม่หาย
  */
 function ติดตั้งระบบ() {
+  AUTH_ownerOnly_();
   var props = PropertiesService.getScriptProperties();
   var ss;
 
@@ -74,23 +78,118 @@ function ติดตั้งระบบ() {
     }
   }
 
-  // ผู้ติดตั้งเป็นผู้ดูแลระบบคนแรก
-  if (!props.getProperty('BOOTSTRAP_ADMIN_EMAIL')) {
-    var me = '';
-    try { me = str(Session.getEffectiveUser().getEmail()).toLowerCase(); } catch (e) { me = ''; }
-    if (me) props.setProperty('BOOTSTRAP_ADMIN_EMAIL', me);
-  }
-
+  DB_SS_ = ss;
   DB_invalidateAll();
   SETUP_seedConfig_();
+
+  // ข้อมูลครูจากระบบเดิม (เข้าด้วยอีเมล) ยังไม่มีชื่อผู้ใช้ — ตั้งให้อัตโนมัติ
+  var named = SETUP_fillUsernames_();
+  var admin = SETUP_ensureAdmin_();
 
   var msg = 'ติดตั้งระบบเรียบร้อย\n\n' +
     'สเปรดชีต: ' + ss.getName() + '\n' +
     'สร้างชีตใหม่: ' + (report.created.length ? report.created.join(', ') : 'ไม่มี') + '\n' +
     'ปรับคอลัมน์: ' + (report.patched.length ? report.patched.join('; ') : 'ไม่มี') + '\n' +
-    'ครบถ้วนอยู่แล้ว: ' + report.ok.length + ' ชีต\n\n' +
-    'ผู้ดูแลระบบเริ่มต้น: ' + (props.getProperty('BOOTSTRAP_ADMIN_EMAIL') || '(ไม่ทราบ)');
+    'ครบถ้วนอยู่แล้ว: ' + report.ok.length + ' ชีต\n' +
+    (named ? 'ตั้งชื่อผู้ใช้ให้ครูเดิม: ' + named + ' คน (ใช้ส่วนหน้า @ ของอีเมล)\n' : '') +
+    '\n' + (admin ? SETUP_credentialText_(admin) :
+      'มีผู้ดูแลระบบที่เข้าสู่ระบบได้แล้ว — ถ้าลืมรหัสผ่าน ให้รัน รีเซ็ตรหัสผ่านผู้ดูแลระบบ()');
 
+  SETUP_toast_(msg);
+  return msg;
+}
+
+/** ตั้งชื่อผู้ใช้ให้ครูที่ยังไม่มี จากอีเมลหรือรหัสครู คืนจำนวนที่ตั้งให้ */
+function SETUP_fillUsernames_() {
+  var rows = dbReadAll('TEACHERS');
+  var taken = {};
+  rows.forEach(function (r) {
+    var u = AUTH_normalizeUsername(r.username);
+    if (u) taken[u] = true;
+  });
+  var items = [];
+  rows.forEach(function (r) {
+    if (str(r.username)) return;
+    var u = TEACHER_uniqueUsername_(TEACHER_suggestUsername_(r), taken);
+    if (!u) return;
+    taken[u] = true;
+    items.push({ id: r.id, patch: { username: u } });
+  });
+  if (items.length) dbUpdateMany('TEACHERS', items);
+  return items.length;
+}
+
+/**
+ * ต้องมีผู้ดูแลระบบอย่างน้อย 1 คนที่เข้าสู่ระบบได้
+ * ถ้ามีผู้ดูแลระบบแต่ยังไม่มีรหัสผ่าน (ย้ายจากระบบเดิม) ออกรหัสผ่านชั่วคราวให้คนแรก
+ * ถ้าไม่มีเลย สร้างบัญชี admin ใหม่ — คืน { name, username, tempPassword } หรือ null
+ */
+function SETUP_ensureAdmin_() {
+  var admins = dbFind('TEACHERS', { role: 'SYS_ADMIN', status: 'ACTIVE' });
+  var ready = admins.filter(function (a) { return str(a.username) && str(a.password_hash); });
+  if (ready.length) return null;
+  if (admins.length) return SETUP_issueAdminPassword_(admins[0]);
+
+  var taken = {};
+  dbReadAll('TEACHERS').forEach(function (r) {
+    var u = AUTH_normalizeUsername(r.username);
+    if (u) taken[u] = true;
+  });
+  var temp = AUTH_tempPassword_();
+  var row = {
+    code: dbGetBy('TEACHERS', { code: 'ADMIN' }) ? '' : 'ADMIN',
+    prefix: '', first_name: 'ผู้ดูแล', last_name: 'ระบบ',
+    username: TEACHER_uniqueUsername_('admin', taken),
+    department: 'ฝ่ายบริหารทั่วไป', position: 'ผู้ดูแลระบบ',
+    role: 'SYS_ADMIN', status: 'ACTIVE'
+  };
+  var pw = AUTH_passwordPatch_(temp, true);
+  Object.keys(pw).forEach(function (k) { row[k] = pw[k]; });
+  var created = dbInsert('TEACHERS', row);
+  AUDIT_log(AUTH_ownerContext_(), 'SETUP_CREATE_ADMIN', 'TEACHERS', created.id, null,
+    { username: row.username });
+  AUDIT_flush();
+  return { name: teacherFullName(created), username: row.username, tempPassword: temp };
+}
+
+/** ออกรหัสผ่านชั่วคราวให้ผู้ดูแลระบบ (ตั้งชื่อผู้ใช้ให้ด้วยถ้ายังไม่มี) */
+function SETUP_issueAdminPassword_(t) {
+  var username = AUTH_normalizeUsername(t.username);
+  if (!username) {
+    var taken = {};
+    dbReadAll('TEACHERS').forEach(function (r) {
+      var u = AUTH_normalizeUsername(r.username);
+      if (u) taken[u] = true;
+    });
+    username = TEACHER_uniqueUsername_(TEACHER_suggestUsername_(t) || 'admin', taken);
+  }
+  var temp = AUTH_tempPassword_();
+  var patch = AUTH_passwordPatch_(temp, true);
+  patch.username = username;
+  dbUpdate('TEACHERS', t.id, patch);
+  AUTH_failClear_(username);
+  AUDIT_log(AUTH_ownerContext_(), 'SETUP_ADMIN_PASSWORD', 'TEACHERS', t.id, null, { username: username });
+  AUDIT_flush();
+  return { name: teacherFullName(t), username: username, tempPassword: temp };
+}
+
+function SETUP_credentialText_(acc) {
+  return 'บัญชีผู้ดูแลระบบสำหรับเข้าสู่ระบบ (' + acc.name + ')\n' +
+    '  ชื่อผู้ใช้: ' + acc.username + '\n' +
+    '  รหัสผ่านชั่วคราว: ' + acc.tempPassword + '\n\n' +
+    'จดไว้ก่อนปิดหน้าต่างนี้ — ระบบจะให้ตั้งรหัสผ่านใหม่ทันทีที่เข้าสู่ระบบครั้งแรก';
+}
+
+/**
+ * ลืมรหัสผ่านผู้ดูแลระบบ — ออกรหัสผ่านชั่วคราวใหม่ให้ผู้ดูแลระบบคนแรก
+ * (หรือสร้างบัญชี admin ถ้าไม่มีผู้ดูแลระบบเหลืออยู่) ใช้ได้เฉพาะเจ้าของสคริปต์
+ */
+function รีเซ็ตรหัสผ่านผู้ดูแลระบบ() {
+  AUTH_ownerOnly_();
+  var admins = dbFind('TEACHERS', { role: 'SYS_ADMIN', status: 'ACTIVE' });
+  var withName = admins.filter(function (a) { return str(a.username); });
+  var acc = (withName[0] || admins[0]) ? SETUP_issueAdminPassword_(withName[0] || admins[0]) : SETUP_ensureAdmin_();
+  var msg = SETUP_credentialText_(acc);
   SETUP_toast_(msg);
   return msg;
 }
@@ -156,6 +255,7 @@ function SETUP_toast_(msg) {
 
 /** ล้างแคชทั้งหมด */
 function ล้างแคช() {
+  AUTH_ownerOnly_();
   DB_invalidateAll();
   PR_INDEX_CACHE = {};
   SETUP_toast_('ล้างแคชเรียบร้อย');
@@ -250,36 +350,9 @@ function SETUP_seedSample(ctx) {
 
 /** เรียกจากเมนูในตัวแก้ไข */
 function ใส่ข้อมูลตัวอย่าง() {
-  var ctx = AUTH_context();
-  if (!ctx.ok) { SETUP_toast_('กรุณาติดตั้งระบบก่อน: ' + ctx.reason); return; }
+  var ctx = AUTH_ownerOnly_();
   var r = SETUP_seedSample(ctx);
   AUDIT_flush();
   SETUP_toast_('ใส่ข้อมูลตัวอย่างเรียบร้อย\nช่วงเวลา ' + r.slots + ' · จุดเวร ' + r.points +
     ' · ภาคเรียน ' + r.semester);
-}
-
-/** เพิ่มผู้ดูแลระบบคนแรกจากอีเมลผู้ติดตั้ง */
-function SETUP_claimAdmin(ctx, data) {
-  AUTH_require(ctx);
-  var bootstrap = PROP_bootstrapAdmin();
-  if (!bootstrap || ctx.email !== bootstrap) {
-    throw new Error('เฉพาะผู้ติดตั้งระบบเท่านั้นที่ใช้คำสั่งนี้ได้');
-  }
-  if (ctx.teacherId) throw new Error('บัญชีนี้มีข้อมูลครูอยู่แล้ว');
-
-  var d = data || {};
-  var created = dbInsert('TEACHERS', {
-    code: sanitizeText(d.code) || 'ADMIN',
-    prefix: sanitizeText(d.prefix) || '',
-    first_name: sanitizeText(d.firstName) || 'ผู้ดูแล',
-    last_name: sanitizeText(d.lastName) || 'ระบบ',
-    email: ctx.email,
-    department: sanitizeText(d.department) || 'ฝ่ายบริหารทั่วไป',
-    position: sanitizeText(d.position) || 'ผู้ดูแลระบบ',
-    role: 'SYS_ADMIN',
-    status: 'ACTIVE'
-  });
-  AUTH_MEM = null;
-  AUDIT_log(ctx, 'SETUP_CLAIM_ADMIN', 'TEACHERS', created.id, null, { email: ctx.email });
-  return { id: created.id };
 }

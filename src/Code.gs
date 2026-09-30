@@ -1,8 +1,8 @@
 /**
  * Code.gs — จุดเข้าเว็บแอปและประตูเรียก API เพียงทางเดียว
  *
- * ฝั่ง Client เรียกได้ทางเดียวคือ api(action, payload)
- * ทุก action ตรวจสอบสิทธิ์ฝั่ง Server เสมอ
+ * ฝั่ง Client เรียกได้ทางเดียวคือ api(action, payload, token)
+ * ทุก action ตรวจสอบสิทธิ์ฝั่ง Server เสมอ ยกเว้นรายการใน API_PUBLIC_
  */
 
 var APP_VERSION = '2.0.0';
@@ -32,6 +32,11 @@ function API_ROUTES_() {
     'system.selfTest':    function (ctx) { return DIAG_selfTest(ctx); },
     'system.repair':      function (ctx) { return DIAG_repair(ctx); },
     'system.clearCache':  function (ctx) { return DIAG_clearCache(ctx); },
+
+    // เข้าสู่ระบบ
+    'auth.login':         function (ctx, p) { return API_login_(p); },
+    'auth.logout':        function (ctx) { return AUTH_logout(ctx); },
+    'auth.changePassword':function (ctx, p) { return AUTH_changePassword(ctx, (p || {}).currentPassword, (p || {}).newPassword); },
 
     // หน้าวันนี้
     'today.summary':      function (ctx, p) { return TODAY_summary(ctx, p); },
@@ -110,6 +115,8 @@ function API_ROUTES_() {
     'teacher.get':        function (ctx, p) { return TEACHER_get(ctx, (p || {}).id); },
     'teacher.save':       function (ctx, p) { return TEACHER_save(ctx, p); },
     'teacher.status':     function (ctx, p) { return TEACHER_setStatus(ctx, (p || {}).id, (p || {}).status); },
+    'teacher.resetPassword': function (ctx, p) { return TEACHER_resetPassword(ctx, (p || {}).id); },
+    'teacher.issuePasswords':function (ctx) { return TEACHER_issuePasswords(ctx); },
     'teacher.departments':function (ctx) { return TEACHER_departments(ctx); },
     'teacher.importPreview': function (ctx, p) { return TEACHER_importPreview(ctx, (p || {}).text); },
     'teacher.importCommit':  function (ctx, p) { return TEACHER_importCommit(ctx, (p || {}).text); },
@@ -139,12 +146,24 @@ function API_ROUTES_() {
     'config.set':         function (ctx, p) { return CFG_set(ctx, (p || {}).key, (p || {}).value); },
     'setup.status':       function (ctx) { return SETUP_status(ctx); },
     'setup.seedSample':   function (ctx) { return SETUP_seedSample(ctx); },
-    'setup.claimAdmin':   function (ctx, p) { return SETUP_claimAdmin(ctx, p); },
 
     // ประวัติ
     'audit.search':       function (ctx, p) { return AUDIT_search(ctx, p); },
     'audit.actions':      function (ctx) { return AUDIT_actions(ctx); }
   };
+}
+
+/** คำสั่งที่เรียกได้ก่อนเข้าสู่ระบบ */
+var API_PUBLIC_ = { 'ping': true, 'bootstrap': true, 'auth.login': true, 'auth.logout': true };
+
+/** คำสั่งที่ใช้ได้ระหว่างที่ผู้ใช้ยังต้องตั้งรหัสผ่านใหม่ */
+var API_DURING_PW_CHANGE_ = { 'auth.changePassword': true };
+
+/** เข้าสู่ระบบแล้วส่งข้อมูลตั้งต้นกลับไปในรอบเดียว */
+function API_login_(p) {
+  var d = p || {};
+  var ctx = AUTH_login(d.username, d.password);
+  return { token: ctx.token, boot: API_bootstrap_(ctx) };
 }
 
 /** ข้อมูลตั้งต้นที่หน้าเว็บต้องใช้ทันที — เบาที่สุดเท่าที่จะทำได้ */
@@ -153,10 +172,9 @@ function API_bootstrap_(ctx) {
   if (!ctx.ok) {
     return {
       authorized: false,
-      reason: ctx.reason || 'ไม่สามารถยืนยันตัวตนได้',
+      loginRequired: true,
+      reason: ctx.reason || 'กรุณาเข้าสู่ระบบ',
       reasonCode: ctx.code_reason || 'UNKNOWN',
-      email: ctx.email || '',
-      canClaimAdmin: !!(ctx.email && PROP_bootstrapAdmin() && ctx.email === PROP_bootstrapAdmin()),
       brand: brand,
       version: APP_VERSION
     };
@@ -168,8 +186,9 @@ function API_bootstrap_(ctx) {
     version: APP_VERSION,
     brand: brand,
     user: {
-      name: ctx.name, email: ctx.email, role: ctx.role, roleName: ctx.roleName,
-      level: ctx.level, department: ctx.department, teacherId: ctx.teacherId
+      name: ctx.name, username: ctx.username, email: ctx.email, role: ctx.role, roleName: ctx.roleName,
+      level: ctx.level, department: ctx.department, teacherId: ctx.teacherId,
+      mustChangePassword: ctx.mustChangePassword
     },
     menu: AUTH_menuFor(ctx),
     today: today(),
@@ -189,26 +208,34 @@ function API_bootstrap_(ctx) {
 /**
  * ทุกคำขอจากหน้าเว็บผ่านฟังก์ชันนี้
  * คืนค่าเป็น { ok, data } หรือ { ok:false, error, code } เสมอ — ไม่เคยคืนข้อความว่าง
+ * ห้ามบันทึก payload ลง log เพราะอาจมีรหัสผ่าน
  */
-function api(action, payload) {
+function api(action, payload, token) {
   var started = new Date().getTime();
   DB_STATS = { sheetReads: 0, memHits: 0, cacheHits: 0 };
+  AUTH_MEM = null;
+  EXEC_trust_();   // ทุกเส้นทางด้านล่างตรวจสิทธิ์ของตนเอง
 
   var act = str(action);
   try {
     if (!act) throw new Error('ไม่ได้ระบุคำสั่งที่ต้องการเรียก');
 
     var routes = API_ROUTES_();
-    var fn = routes[act];
+    var fn = Object.prototype.hasOwnProperty.call(routes, act) ? routes[act] : null;
     if (!fn) throw new Error('ไม่รู้จักคำสั่ง "' + act + '" — กรุณารีเฟรชหน้าเว็บ');
 
-    var ctx = AUTH_context();
+    var ctx = AUTH_context(token);
+    var isPublic = API_PUBLIC_[act] === true;
 
-    // ping กับ bootstrap ต้องเรียกได้แม้ยังไม่ผ่านการยืนยันตัวตน
-    if (act !== 'ping' && act !== 'bootstrap') AUTH_require(ctx);
+    if (!isPublic) {
+      AUTH_require(ctx);
+      if (ctx.mustChangePassword && API_DURING_PW_CHANGE_[act] !== true) {
+        throw AUTH_error_('กรุณาตั้งรหัสผ่านใหม่ก่อนเริ่มใช้งาน', 'MUST_CHANGE_PASSWORD');
+      }
+    }
 
-    // ระบบปิดปรับปรุง
-    if (act !== 'ping' && act !== 'bootstrap' && CFG_str('system_status') === 'MAINTENANCE') {
+    // ระบบปิดปรับปรุง (ยังเข้าสู่ระบบได้ เพื่อให้ผู้ดูแลระบบเข้ามาเปิดระบบคืน)
+    if (!isPublic && CFG_str('system_status') === 'MAINTENANCE') {
       if (ctx.role !== 'SYS_ADMIN') {
         throw new Error(CFG_str('maintenance_message') ||
           'ระบบปิดปรับปรุงชั่วคราว กรุณาลองใหม่ภายหลัง');

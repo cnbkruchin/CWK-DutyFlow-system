@@ -122,6 +122,7 @@ function NOTIFY_reviewers_(includeExecutive) {
 
 /** เตือนครูที่มีเวรวันนี้ (ตั้งเป็น time-driven trigger ตอนเช้า) */
 function แจ้งเตือนเวรประจำวัน() {
+  if (!EXEC_beginJob_('REMIND')) return;
   if (!NOTIFY_enabled_()) return;
   var d = today();
   var rows = dbReadAll('DAILY_SCHEDULE').filter(function (r) {
@@ -151,6 +152,7 @@ function แจ้งเตือนเวรประจำวัน() {
 
 /** สรุปผู้ไม่มาอยู่เวรให้หัวหน้างาน (ตั้งเป็น trigger ตอนเย็น) */
 function สรุปผู้ไม่อยู่เวรประจำวัน() {
+  if (!EXEC_beginJob_('ABSENT_SUMMARY')) return;
   if (!NOTIFY_enabled_() || !CFG_bool('notify_absent_summary')) return;
   var d = today();
   var rows = REPORT_buildRows_(d, d).filter(function (r) {
@@ -173,6 +175,7 @@ function สรุปผู้ไม่อยู่เวรประจำว�
 
 /** สร้างตารางล่วงหน้าอัตโนมัติ (ตั้งเป็น trigger รายสัปดาห์) */
 function สร้างตารางเวรล่วงหน้าอัตโนมัติ() {
+  if (!EXEC_beginJob_('AUTO_SCHEDULE')) return;
   var semester = SEMESTER_active();
   if (!semester) return;
   var ahead = num(CFG_get('schedule_generate_ahead', 30), 30);

@@ -5,6 +5,7 @@
 
 var App = {
   boot: null,           // ข้อมูลตั้งต้นจากเซิร์ฟเวอร์
+  token: '',            // เซสชันหลังเข้าสู่ระบบ — อยู่ในหน่วยความจำเท่านั้น รีเฟรชหน้า = เข้าสู่ระบบใหม่
   view: 'today',        // หน้าที่กำลังแสดง
   state: {},            // สถานะของแต่ละหน้า
   ready: false
@@ -17,8 +18,9 @@ var _cache = {};
 /* ---------------- เรียกเซิร์ฟเวอร์ ---------------- */
 
 /**
- * เรียก api(action, payload) ฝั่งเซิร์ฟเวอร์
+ * เรียก api(action, payload, token) ฝั่งเซิร์ฟเวอร์
  * คืน Promise ที่ reject ด้วย Error ที่มีข้อความเสมอ (ไม่มีวันว่าง)
+ * เซสชันหมดอายุ → กลับไปหน้าเข้าสู่ระบบ · ต้องตั้งรหัสผ่านใหม่ → ไปหน้าตั้งรหัสผ่าน
  */
 function call(action, payload) {
   return new Promise(function (resolve, reject) {
@@ -46,6 +48,8 @@ function call(action, payload) {
           var e = new Error(res.error || 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ');
           e.code = res.code || 'ERROR';
           e.action = res.action || action;
+          if (e.code === 'AUTH_REQUIRED') onAuthLost(e.message);
+          else if (e.code === 'MUST_CHANGE_PASSWORD') showForcedPasswordChange();
           finish(reject, e);
         })
         .withFailureHandler(function (err) {
@@ -53,7 +57,7 @@ function call(action, payload) {
           if (!msg) msg = 'ติดต่อเซิร์ฟเวอร์ไม่สำเร็จ (คำสั่ง: ' + action + ')';
           finish(reject, new Error(msg));
         })
-        .api(action, payload || {});
+        .api(action, payload || {}, App.token || '');
     } catch (err) {
       finish(reject, new Error('เรียกเซิร์ฟเวอร์ไม่สำเร็จ: ' +
         ((err && err.message) || 'ไม่ทราบสาเหตุ')));
@@ -143,10 +147,14 @@ function modal(opts) {
     }));
   });
 
+  _modalSticky = !!o.sticky;
   $('modalBackdrop').hidden = false;
 }
 
-function closeModal() { $('modalBackdrop').hidden = true; }
+/** กล่องที่ปิดได้เฉพาะปุ่มในกล่อง (กันข้อมูลสำคัญหายเพราะแตะพื้นหลังพลาด) */
+var _modalSticky = false;
+
+function closeModal() { _modalSticky = false; $('modalBackdrop').hidden = true; }
 
 function confirmBox(title, text, onYes, yesLabel) {
   modal({
@@ -336,58 +344,201 @@ function applyBrand(brand) {
   }
 }
 
+/**
+ * เปิดหน้าเว็บ = ยังไม่มีเซสชันเสมอ จึงแสดงหน้าเข้าสู่ระบบทันที
+ * แล้วค่อยโหลดสีและชื่อโรงเรียนตามมา
+ */
 function startApp() {
-  bootStep('กำลังยืนยันตัวตน…');
-
+  showLogin('');
   return call('bootstrap')
     .then(function (data) {
       applyBrand(data.brand);
-
-      if (!data.authorized) {
-        var extra = '';
-        if (data.reasonCode === 'NOT_REGISTERED') {
-          extra = '\n\nวิธีแก้: แจ้งผู้ดูแลระบบให้เพิ่มอีเมลนี้ในเมนู ข้อมูลหลัก > ครู';
-        } else if (data.reasonCode === 'WRONG_DOMAIN') {
-          extra = '\n\nวิธีแก้: ออกจากระบบ Google แล้วเข้าใหม่ด้วยบัญชีของโรงเรียน ' +
-            'หรือเปิดลิงก์ในหน้าต่างไม่ระบุตัวตน';
-        } else if (data.reasonCode === 'NO_EMAIL') {
-          extra = '\n\nวิธีแก้: ผู้ดูแลระบบต้องตั้งค่าการ Deploy เป็น Execute as "Me" ' +
-            'และ Who has access เป็นผู้ใช้ในโดเมนของโรงเรียน';
-        }
-        bootError((data.reason || 'ไม่สามารถเข้าสู่ระบบได้') + extra);
-
-        if (data.canClaimAdmin) {
-          var b = $('bootDiagBtn');
-          if (b) {
-            b.textContent = 'ตั้งบัญชีนี้เป็นผู้ดูแลระบบ';
-            b.onclick = function () {
-              busy(true);
-              call('setup.claimAdmin', {})
-                .then(function () { location.reload(); })
-                .catch(function (e) { busy(false); alert(e.message); });
-            };
-          }
-        }
-        return null;
+      if (data.brand && data.brand.systemStatus === 'MAINTENANCE') {
+        formMsg('loginMsg', data.brand.maintenanceMessage ||
+          'ระบบปิดปรับปรุงชั่วคราว (ผู้ดูแลระบบยังเข้าสู่ระบบได้)', 'info');
       }
-
-      App.boot = data;
-      App.ready = true;
-
-      $('userName').textContent = data.user.name;
-      $('userRole').textContent = data.user.roleName;
-
-      bootStep('พร้อมใช้งาน');
-      $('boot').hidden = true;
-      $('app').hidden = false;
-
-      renderNav();
-      go(data.setup && !data.setup.ready && data.user.level >= 3 ? 'settings' : 'today');
       return data;
     })
     .catch(function (err) {
-      bootError((err && err.message) || 'เริ่มระบบไม่สำเร็จ', err && err.stack);
+      formMsg('loginMsg', 'เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ: ' +
+        ((err && err.message) || 'ไม่ทราบสาเหตุ') + '\nกรุณาตรวจสอบอินเทอร์เน็ตแล้วรีเฟรชหน้า');
     });
+}
+
+/** เข้าสู่หน้าหลักด้วยข้อมูลจาก bootstrap */
+function enterApp(data) {
+  App.boot = data;
+  App.ready = true;
+  App.state = {};
+
+  $('userName').textContent = data.user.name;
+  $('userRole').textContent = data.user.roleName;
+
+  bootStep('พร้อมใช้งาน');
+  $('boot').hidden = true;
+  $('app').hidden = false;
+
+  renderNav();
+  go(data.setup && !data.setup.ready && data.user.level >= 3 ? 'settings' : 'today');
+  return data;
+}
+
+/* ---------------- เข้าสู่ระบบ / ออกจากระบบ ---------------- */
+
+var Auth = {
+  lastPassword: ''      // รหัสผ่านที่เพิ่งใช้เข้าสู่ระบบ ใช้ตอนบังคับตั้งรหัสใหม่ทันที แล้วล้างทิ้ง
+};
+
+function formMsg(id, text, kind) {
+  var n = $(id);
+  if (!n) return;
+  n.textContent = String(text || '');
+  n.className = 'login-msg' + (kind === 'info' ? ' info' : '');
+  n.hidden = !text;
+}
+
+/** สลับแผงบนการ์ดหน้าแรก: login | password */
+function showBootPanel(which) {
+  closeModal();
+  busy(false);
+  App.ready = false;
+  $('app').hidden = true;
+  $('boot').hidden = false;
+  $('bootSpinner').style.display = 'none';
+  bootStep('');
+  $('bootError').hidden = true;
+  $('loginForm').hidden = which !== 'login';
+  $('pwForm').hidden = which !== 'password';
+}
+
+function showLogin(message, kind) {
+  App.boot = null;
+  showBootPanel('login');
+  $('bootSub').textContent = 'เข้าสู่ระบบด้วยชื่อผู้ใช้และรหัสผ่าน';
+  formMsg('loginMsg', message, kind);
+  $('loginPass').value = '';
+  setTimeout(function () {
+    var f = $('loginUser').value ? $('loginPass') : $('loginUser');
+    try { f.focus(); } catch (e) { }
+  }, 50);
+}
+
+/** เซสชันหมดอายุหรือบัญชีถูกระงับระหว่างใช้งาน */
+function onAuthLost(message) {
+  if (!App.token && !$('loginForm').hidden) return;
+  App.token = '';
+  Auth.lastPassword = '';
+  clearCache();
+  showLogin(message || 'กรุณาเข้าสู่ระบบใหม่');
+}
+
+function doLogin(e) {
+  if (e) e.preventDefault();
+  var username = $('loginUser').value.trim();
+  var password = $('loginPass').value;
+  if (!username || !password) {
+    formMsg('loginMsg', 'กรุณากรอกชื่อผู้ใช้และรหัสผ่าน');
+    return;
+  }
+  var btn = $('loginBtn');
+  btn.disabled = true;
+  btn.textContent = 'กำลังตรวจสอบ…';
+  formMsg('loginMsg', '');
+
+  call('auth.login', { username: username, password: password })
+    .then(function (res) {
+      App.token = res.token;
+      clearCache();
+      $('loginPass').value = '';
+      if (res.boot.user.mustChangePassword) {
+        Auth.lastPassword = password;
+        App.boot = res.boot;
+        showForcedPasswordChange();
+      } else {
+        enterApp(res.boot);
+      }
+    })
+    .catch(function (err) {
+      formMsg('loginMsg', err.message);
+      $('loginPass').value = '';
+      try { $('loginPass').focus(); } catch (e2) { }
+    })
+    .then(function () {
+      btn.disabled = false;
+      btn.textContent = 'เข้าสู่ระบบ';
+    });
+}
+
+/** บังคับตั้งรหัสผ่านใหม่ (เข้าครั้งแรก หรือหลังผู้ดูแลรีเซ็ต) */
+function showForcedPasswordChange() {
+  if (!App.token) return onAuthLost();
+  var u = (App.boot && App.boot.user) || {};
+  showBootPanel('password');
+  $('bootSub').textContent = u.name ? u.name + ' (' + u.username + ')' : 'ตั้งรหัสผ่านใหม่';
+  $('pwUser').value = u.username || '';
+  $('pwCurrentField').hidden = !!Auth.lastPassword;
+  ['pwCurrent', 'pwNew', 'pwConfirm'].forEach(function (id) { $(id).value = ''; });
+  formMsg('pwMsg', '');
+  setTimeout(function () {
+    try { ($('pwCurrentField').hidden ? $('pwNew') : $('pwCurrent')).focus(); } catch (e) { }
+  }, 50);
+}
+
+function passwordFormProblem(current, next, confirm) {
+  if (!current) return 'กรุณากรอกรหัสผ่านปัจจุบัน';
+  if (!next) return 'กรุณากรอกรหัสผ่านใหม่';
+  if (next !== confirm) return 'รหัสผ่านใหม่ทั้งสองช่องไม่ตรงกัน';
+  return '';
+}
+
+function doForcedPasswordChange(e) {
+  if (e) e.preventDefault();
+  var current = Auth.lastPassword || $('pwCurrent').value;
+  var next = $('pwNew').value;
+  var problem = passwordFormProblem(current, next, $('pwConfirm').value);
+  if (problem) { formMsg('pwMsg', problem); return; }
+
+  var btn = $('pwBtn');
+  btn.disabled = true;
+  btn.textContent = 'กำลังบันทึก…';
+  formMsg('pwMsg', '');
+
+  call('auth.changePassword', { currentPassword: current, newPassword: next })
+    .then(function () {
+      Auth.lastPassword = '';
+      return call('bootstrap');
+    })
+    .then(function (data) {
+      if (!data.authorized) return showLogin(data.reason);
+      enterApp(data);
+      toast('ตั้งรหัสผ่านใหม่เรียบร้อย', 'ok');
+    })
+    .catch(function (err) { formMsg('pwMsg', err.message); })
+    .then(function () {
+      btn.disabled = false;
+      btn.textContent = 'บันทึกรหัสผ่านใหม่';
+    });
+}
+
+/** ออกจากระบบทันที แล้วแจ้งเซิร์ฟเวอร์ให้ยกเลิกเซสชัน (ไม่ต้องรอผล) */
+function doLogout() {
+  if (App.token) call('auth.logout', {}).catch(function () { });
+  App.token = '';
+  Auth.lastPassword = '';
+  clearCache();
+  showLogin('ออกจากระบบเรียบร้อย', 'info');
+}
+
+function bindPasswordToggles() {
+  document.querySelectorAll('[data-pw-toggle]').forEach(function (b) {
+    b.onclick = function () {
+      var input = $(b.getAttribute('data-pw-toggle'));
+      if (!input) return;
+      var show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      b.textContent = show ? 'ซ่อน' : 'แสดง';
+    };
+  });
 }
 
 /* ---------------- ตัวจัดการเหตุการณ์ระดับหน้าต่าง ---------------- */
@@ -423,11 +574,23 @@ function bindShell() {
   if (mc) mc.onclick = closeModal;
 
   var mb = $('modalBackdrop');
-  if (mb) mb.addEventListener('click', function (e) { if (e.target === mb) closeModal(); });
+  if (mb) mb.addEventListener('click', function (e) { if (e.target === mb && !_modalSticky) closeModal(); });
 
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') closeModal();
+    if (e.key === 'Escape' && !_modalSticky) closeModal();
   });
+
+  var lf = $('loginForm');
+  if (lf) lf.onsubmit = doLogin;
+  var pf = $('pwForm');
+  if (pf) pf.onsubmit = doForcedPasswordChange;
+  var pl = $('pwLogout');
+  if (pl) pl.onclick = doLogout;
+  var ab = $('accountBtn');
+  if (ab) ab.onclick = openAccountMenu;
+  var uc = $('userChip');
+  if (uc) uc.onclick = openAccountMenu;
+  bindPasswordToggles();
 
   var bd = $('bootDiagBtn');
   if (bd) bd.onclick = function () {
@@ -436,7 +599,7 @@ function bindShell() {
       .then(function (p) {
         busy(false);
         alert('เชื่อมต่อเซิร์ฟเวอร์ได้ (เวอร์ชัน ' + p.version + ')\n' +
-          'ปัญหาน่าจะอยู่ที่สิทธิ์การเข้าถึงหรือข้อมูลผู้ใช้');
+          'กรุณารีเฟรชหน้าแล้วเข้าสู่ระบบใหม่');
       })
       .catch(function (e) {
         busy(false);

@@ -9,14 +9,57 @@
 </head>
 <body>
 
-  <!-- หน้าจอระหว่างเริ่มระบบ -->
+  <!-- หน้าจอระหว่างเริ่มระบบ / เข้าสู่ระบบ -->
   <div id="boot" class="boot">
     <div class="boot-card">
       <div class="boot-logo">จ.ว.</div>
       <div class="boot-title">CWK DutyFlow</div>
-      <div class="boot-sub">ระบบบริหารเวรประจำวัน</div>
+      <div class="boot-sub" id="bootSub">ระบบบริหารเวรประจำวัน</div>
       <div class="boot-spinner" id="bootSpinner"></div>
       <div class="boot-step" id="bootStep">กำลังเริ่มระบบ…</div>
+
+      <form class="login-form" id="loginForm" hidden novalidate>
+        <div class="field">
+          <label for="loginUser">ชื่อผู้ใช้</label>
+          <input class="input" id="loginUser" name="username" type="text" autocomplete="username"
+                 autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64">
+        </div>
+        <div class="field">
+          <label for="loginPass">รหัสผ่าน</label>
+          <div class="pw-wrap">
+            <input class="input" id="loginPass" name="password" type="password"
+                   autocomplete="current-password" maxlength="128">
+            <button class="pw-toggle" type="button" data-pw-toggle="loginPass">แสดง</button>
+          </div>
+        </div>
+        <div class="login-msg" id="loginMsg" hidden></div>
+        <button class="btn btn-primary btn-block" id="loginBtn" type="submit">เข้าสู่ระบบ</button>
+        <div class="login-help">ลืมรหัสผ่านหรือยังไม่มีบัญชี กรุณาติดต่อหัวหน้างานเวรหรือผู้ดูแลระบบ</div>
+      </form>
+
+      <form class="login-form" id="pwForm" hidden novalidate>
+        <div class="login-note" id="pwNote">กรุณาตั้งรหัสผ่านใหม่ของท่านเองก่อนเริ่มใช้งาน</div>
+        <input type="text" name="username" id="pwUser" autocomplete="username" hidden>
+        <div class="field" id="pwCurrentField" hidden>
+          <label for="pwCurrent">รหัสผ่านปัจจุบัน</label>
+          <input class="input" id="pwCurrent" type="password" autocomplete="current-password" maxlength="128">
+        </div>
+        <div class="field">
+          <label for="pwNew">รหัสผ่านใหม่</label>
+          <div class="pw-wrap">
+            <input class="input" id="pwNew" type="password" autocomplete="new-password" maxlength="128">
+            <button class="pw-toggle" type="button" data-pw-toggle="pwNew">แสดง</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="pwConfirm">พิมพ์รหัสผ่านใหม่อีกครั้ง</label>
+          <input class="input" id="pwConfirm" type="password" autocomplete="new-password" maxlength="128">
+        </div>
+        <div class="login-msg" id="pwMsg" hidden></div>
+        <button class="btn btn-primary btn-block" id="pwBtn" type="submit">บันทึกรหัสผ่านใหม่</button>
+        <button class="btn btn-ghost btn-block mt8" id="pwLogout" type="button">ออกจากระบบ</button>
+      </form>
+
       <div class="boot-error" id="bootError" hidden>
         <div class="boot-error-title" id="bootErrorTitle">เริ่มระบบไม่สำเร็จ</div>
         <div class="boot-error-msg" id="bootErrorMsg"></div>
@@ -43,10 +86,12 @@
       </div>
       <div class="topbar-right">
         <button class="icon-btn" id="refreshBtn" type="button" title="โหลดข้อมูลใหม่">↻</button>
-        <div class="user-chip" id="userChip">
+        <div class="user-chip" id="userChip" title="บัญชีของฉัน">
           <div class="user-name" id="userName"></div>
           <div class="user-role" id="userRole"></div>
         </div>
+        <button class="icon-btn" id="accountBtn" type="button" title="บัญชีของฉัน / ออกจากระบบ"
+                aria-label="บัญชีของฉัน">👤</button>
       </div>
     </header>
 

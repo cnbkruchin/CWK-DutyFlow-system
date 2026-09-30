@@ -14,9 +14,16 @@ var CFG_DEFAULTS = {
   school_name:            { v: 'โรงเรียนจุนวิทยาคม', g: 'โรงเรียน', l: 'ชื่อโรงเรียน', t: 'text' },
   school_short:           { v: 'จุนวิทยาคม', g: 'โรงเรียน', l: 'ชื่อย่อ', t: 'text' },
   school_address:         { v: 'อำเภอจุน จังหวัดพะเยา', g: 'โรงเรียน', l: 'ที่ตั้ง', t: 'text' },
-  school_domain:          { v: '', g: 'โรงเรียน', l: 'โดเมนอีเมลโรงเรียน (เว้นว่าง = ไม่จำกัด)', t: 'text' },
+  school_domain:          { v: '', g: 'โรงเรียน', l: 'โดเมน Google Workspace ของโรงเรียน สำหรับแชร์ภาพ/PDF ใน Drive (เว้นว่าง = ส่วนตัว)', t: 'text' },
   school_logo_url:        { v: '', g: 'โรงเรียน', l: 'URL โลโก้', t: 'text' },
   director_name:          { v: '', g: 'โรงเรียน', l: 'ชื่อผู้อำนวยการ', t: 'text' },
+
+  // การเข้าสู่ระบบ
+  session_timeout_min:      { v: 360, g: 'การเข้าสู่ระบบ', l: 'ออกจากระบบอัตโนมัติเมื่อไม่ได้ใช้งาน (นาที 15–360)', t: 'number' },
+  login_max_attempts:       { v: 5, g: 'การเข้าสู่ระบบ', l: 'ใส่รหัสผ่านผิดได้กี่ครั้งก่อนพักบัญชีชั่วคราว', t: 'number' },
+  login_lock_min:           { v: 15, g: 'การเข้าสู่ระบบ', l: 'พักบัญชีชั่วคราวนานกี่นาที', t: 'number' },
+  password_min_length:      { v: 6, g: 'การเข้าสู่ระบบ', l: 'ความยาวรหัสผ่านขั้นต่ำ (ตัวอักษร)', t: 'number' },
+  password_force_change:    { v: true, g: 'การเข้าสู่ระบบ', l: 'บังคับตั้งรหัสผ่านใหม่เมื่อเข้าครั้งแรกหรือหลังรีเซ็ต', t: 'bool' },
 
   // การเช็คอิน / หลักฐาน
   checkin_open_before_min:  { v: 30, g: 'การเช็คอิน', l: 'เปิดให้เช็คอินก่อนเวลาเริ่ม (นาที)', t: 'number' },
@@ -120,7 +127,7 @@ function CFG_set(ctx, key, value) {
     group_name: def.g,
     label: def.l,
     updated_at: nowIso(),
-    updated_by: ctx.email
+    updated_by: ctx.username
   };
 
   if (existing) dbUpdate('CONFIG', existing.id, payload);
@@ -168,13 +175,14 @@ function CFG_brand() {
 /* ---------------- Script Properties (ค่าอ่อนไหว) ---------------- */
 
 function PROP_get(key) {
+  EXEC_assert_();
   return PropertiesService.getScriptProperties().getProperty(key) || '';
 }
 
 function PROP_set(key, value) {
+  EXEC_assert_();
   PropertiesService.getScriptProperties().setProperty(key, String(value));
 }
 
 function PROP_photoFolderId() { return PROP_get('PHOTO_FOLDER_ID'); }
 function PROP_reportFolderId() { return PROP_get('REPORT_FOLDER_ID'); }
-function PROP_bootstrapAdmin() { return str(PROP_get('BOOTSTRAP_ADMIN_EMAIL')).toLowerCase(); }

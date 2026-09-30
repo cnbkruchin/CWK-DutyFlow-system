@@ -81,11 +81,25 @@ function DIAG_selfTest(ctx) {
       'ครู ' + orphan.teacher + ' · จุด ' + orphan.point + ' · ช่วงเวลา ' + orphan.slot) : 'ครบถ้วน',
     'กดปุ่ม "ซ่อมข้อมูล" เพื่อล้างรายการที่เสียและสร้างตารางใหม่');
 
-  // 7. โดเมน
+  // 7. บัญชีผู้ใช้
+  var activeTeachers = dbFind('TEACHERS', { status: 'ACTIVE' });
+  var loginAdmins = activeTeachers.filter(function (t) {
+    return str(t.role) === 'SYS_ADMIN' && str(t.username) && str(t.password_hash);
+  }).length;
+  add('มีผู้ดูแลระบบที่เข้าสู่ระบบได้', loginAdmins > 0, loginAdmins + ' บัญชี',
+    'รัน รีเซ็ตรหัสผ่านผู้ดูแลระบบ() ในตัวแก้ไข Apps Script');
+  var noLogin = activeTeachers.filter(function (t) {
+    return !str(t.username) || !str(t.password_hash);
+  }).length;
+  warn('ครูทุกคนมีชื่อผู้ใช้และรหัสผ่าน', noLogin === 0,
+    noLogin ? 'ยังเข้าสู่ระบบไม่ได้ ' + noLogin + ' คน' : 'ครบ',
+    'ไปที่ ข้อมูลหลัก > ครู แล้วกด "ออกรหัสผ่านชั่วคราว"');
+
+  // 8. โดเมน (ใช้แชร์ภาพ/PDF ใน Drive เท่านั้น)
   var domain = CFG_schoolDomain();
-  warn('กำหนดโดเมนอีเมลโรงเรียน', !!domain,
-    domain ? '@' + domain : 'ยังไม่กำหนด — ทุกบัญชีที่ลงทะเบียนเข้าใช้ได้',
-    'ไปที่ ตั้งค่า > โรงเรียน');
+  warn('กำหนดโดเมน Google ของโรงเรียนสำหรับแชร์ไฟล์ PDF', !!domain,
+    domain ? '@' + domain : 'ยังไม่กำหนด — ไฟล์ PDF ที่สร้างจะเปิดได้เฉพาะเจ้าของสคริปต์',
+    'ไปที่ ตั้งค่า > โรงเรียน (ไม่มีผลต่อการเข้าสู่ระบบ)');
 
   var errors = checks.filter(function (c) { return c.level === 'ERROR'; }).length;
   var warns = checks.filter(function (c) { return c.level === 'WARN'; }).length;
@@ -95,7 +109,7 @@ function DIAG_selfTest(ctx) {
     errors: errors,
     warnings: warns,
     checkedAt: nowIso(),
-    user: { email: ctx.email, name: ctx.name, role: ctx.role, roleName: ctx.roleName },
+    user: { username: ctx.username, name: ctx.name, role: ctx.role, roleName: ctx.roleName },
     checks: checks,
     stats: {
       teachers: teachers, points: points, slots: slots,
@@ -167,8 +181,7 @@ function DIAG_clearCache(ctx) {
 /* ---------------- เรียกจากตัวแก้ไข Apps Script ---------------- */
 
 function ตรวจสอบระบบ() {
-  var ctx = AUTH_context();
-  if (!ctx.ok) { SETUP_toast_('เข้าสู่ระบบไม่สำเร็จ: ' + ctx.reason); return; }
+  var ctx = AUTH_ownerOnly_();
   var r = DIAG_selfTest(ctx);
   var lines = r.checks.map(function (c) {
     return (c.ok ? '✓ ' : (c.level === 'WARN' ? '! ' : '✗ ')) + c.name +
@@ -180,8 +193,7 @@ function ตรวจสอบระบบ() {
 }
 
 function ซ่อมข้อมูล() {
-  var ctx = AUTH_context();
-  if (!ctx.ok) { SETUP_toast_('เข้าสู่ระบบไม่สำเร็จ: ' + ctx.reason); return; }
+  var ctx = AUTH_ownerOnly_();
   var r = DIAG_repair(ctx);
   AUDIT_flush();
   SETUP_toast_(r.message);

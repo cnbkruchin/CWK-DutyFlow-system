@@ -114,6 +114,31 @@ check('มีการเปลี่ยนครูเวรรายวัน'
 check('มีการสลับจุดรายวัน', /schedule\.swap/.test(client));
 check('แสดงระดับผู้อนุมัติ', /approvalLevelName/.test(client));
 
+/* 11. เข้าสู่ระบบด้วยชื่อผู้ใช้/รหัสผ่าน */
+check('แอตทริบิวต์ hidden ซ่อนได้จริง (ชนะ display ของคลาส)',
+  /\[hidden\]\s*\{\s*display:\s*none\s*!important/.test(src['Styles.html']));
+check('มีฟอร์มเข้าสู่ระบบ (ชื่อผู้ใช้ + รหัสผ่าน)',
+  /id="loginForm"/.test(src['Index.html']) && /id="loginUser"/.test(src['Index.html']));
+check('ช่องรหัสผ่านเป็น type=password พร้อม autocomplete',
+  /id="loginPass"[^>]*type="password"[^>]*autocomplete="current-password"/.test(src['Index.html'].replace(/\s+/g, ' ')));
+check('ส่ง token ไปกับทุกคำขอ',
+  /\.api\(action,\s*payload \|\| \{\},\s*App\.token/.test(src['Scripts.html']));
+check('เข้าสู่ระบบผ่าน auth.login', used.has('auth.login'));
+check('มีปุ่มบัญชีของฉันและออกจากระบบ', used.has('auth.logout') && /id="accountBtn"/.test(src['Index.html']));
+check('ผู้ใช้เปลี่ยนรหัสผ่านเองได้', used.has('auth.changePassword'));
+check('บังคับตั้งรหัสผ่านใหม่เมื่อเซิร์ฟเวอร์สั่ง',
+  /MUST_CHANGE_PASSWORD/.test(src['Scripts.html']) && /id="pwForm"/.test(src['Index.html']));
+check('เซสชันหมดอายุแล้วกลับหน้าเข้าสู่ระบบ', /AUTH_REQUIRED[\s\S]{0,40}onAuthLost/.test(src['Scripts.html']));
+check('ผู้ดูแลรีเซ็ต/ออกรหัสผ่านชั่วคราวได้',
+  used.has('teacher.resetPassword') && used.has('teacher.issuePasswords'));
+check('ไม่เหลือโค้ดเข้าระบบด้วยอีเมลแบบเดิม',
+  !/claimAdmin|NOT_REGISTERED|WRONG_DOMAIN|NO_EMAIL/.test(client));
+(function () {
+  const manifest = JSON.parse(fs.readFileSync(path.join(SRC, 'appsscript.json'), 'utf8'));
+  check('เว็บแอปเปิดได้โดยไม่ต้องลงชื่อเข้า Google และรันในนามผู้ติดตั้ง',
+    manifest.webapp.access === 'ANYONE_ANONYMOUS' && manifest.webapp.executeAs === 'USER_DEPLOYING');
+})();
+
 console.log('ผลการตรวจฝั่งหน้าเว็บ');
 notes.forEach(n => console.log('  ' + n));
 if (problems.length) {

@@ -888,12 +888,16 @@ VIEWS.master = function (root, state) {
 
 function renderTeachers(body, state) {
   return call('teacher.list', { includeInactive: true, q: state.q || '' }).then(function (rows) {
+    var noLogin = rows.filter(function (t) { return t.status === 'ACTIVE' && !t.hasPassword; }).length;
     var html = '<div class="card"><div class="card-head">' +
-      '<div><div class="card-title">ทะเบียนครู</div>' +
-      '<div class="card-sub">ทั้งหมด ' + nf(rows.length) + ' คน</div></div>' +
+      '<div><div class="card-title">ทะเบียนครูและบัญชีผู้ใช้</div>' +
+      '<div class="card-sub">ทั้งหมด ' + nf(rows.length) + ' คน' +
+      (noLogin ? ' · ยังเข้าสู่ระบบไม่ได้ ' + nf(noLogin) + ' คน' : '') + '</div></div>' +
       '<div class="card-actions">' +
-      '<input class="input" id="tQ" placeholder="ค้นหาชื่อ/อีเมล/กลุ่มสาระ" value="' + esc(state.q || '') + '" style="width:220px">' +
+      '<input class="input" id="tQ" placeholder="ค้นหาชื่อ/ชื่อผู้ใช้/กลุ่มสาระ" value="' + esc(state.q || '') + '" style="width:220px">' +
       '<button class="btn btn-sm" id="tSearch" type="button">ค้นหา</button>' +
+      (noLogin ? '<button class="btn btn-sm" id="tIssue" type="button" data-count="' + noLogin + '">' +
+        'ออกรหัสผ่านชั่วคราว (' + nf(noLogin) + ')</button>' : '') +
       '<button class="btn btn-sm" id="tImport" type="button">นำเข้าหลายรายการ</button>' +
       '<button class="btn btn-sm btn-primary" id="tAdd" type="button">+ เพิ่มครู</button>' +
       '</div></div><div class="card-body">';
@@ -904,16 +908,20 @@ function renderTeachers(body, state) {
         '<button class="btn btn-primary" id="tAdd2" type="button">+ เพิ่มครูคนแรก</button>');
     } else {
       html += '<div class="table-wrap"><table class="tb"><thead><tr>' +
-        '<th>รหัส</th><th>ชื่อ-สกุล</th><th>อีเมล</th><th>กลุ่มสาระ</th><th>บทบาท</th>' +
+        '<th>รหัส</th><th>ชื่อ-สกุล</th><th>ชื่อผู้ใช้</th><th>กลุ่มสาระ</th><th>บทบาท</th>' +
         '<th>สถานะ</th><th></th></tr></thead><tbody>';
       rows.forEach(function (t) {
         html += '<tr><td class="small">' + esc(t.code) + '</td><td>' + esc(t.name) + '</td>' +
-          '<td class="small muted">' + esc(t.email || '') + '</td>' +
+          '<td class="small">' + (t.username ? esc(t.username) : '<span class="tag tag-danger">ยังไม่มี</span>') +
+          (t.username && !t.hasPassword ? ' <span class="tag tag-warn">ยังไม่มีรหัสผ่าน</span>' : '') + '</td>' +
           '<td class="small">' + esc(t.department) + '</td>' +
           '<td class="small">' + esc(t.roleName || '') + '</td>' +
           '<td>' + (t.status === 'ACTIVE' ? '<span class="tag tag-ok">ใช้งาน</span>' :
             '<span class="tag tag-muted">ระงับ</span>') + '</td>' +
           '<td class="nowrap"><button class="btn btn-sm" data-act="editTeacher" data-id="' + esc(t.id) + '">แก้ไข</button> ' +
+          (t.username && t.id !== App.boot.user.teacherId ?
+            '<button class="btn btn-sm" data-act="resetPw" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '">' +
+            'รีเซ็ตรหัสผ่าน</button> ' : '') +
           '<button class="btn btn-sm" data-act="toggleTeacher" data-id="' + esc(t.id) + '" data-status="' +
           (t.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE') + '">' +
           (t.status === 'ACTIVE' ? 'ระงับ' : 'เปิดใช้') + '</button></td></tr>';
@@ -1127,7 +1135,7 @@ VIEWS.system = function (root) {
 
     html += '<div class="card"><div class="card-head"><div class="card-title">ข้อมูลผู้ใช้ปัจจุบัน</div></div>' +
       '<div class="card-body"><div class="form-row">' +
-      '<div class="field"><label>อีเมล</label><div>' + esc(d.user.email) + '</div></div>' +
+      '<div class="field"><label>ชื่อผู้ใช้</label><div>' + esc(d.user.username) + '</div></div>' +
       '<div class="field"><label>ชื่อ</label><div>' + esc(d.user.name) + '</div></div>' +
       '<div class="field"><label>บทบาท</label><div>' + esc(d.user.roleName) + ' (' + esc(d.user.role) + ')</div></div>' +
       '<div class="field"><label>สถิติการอ่านข้อมูล</label><div class="small muted">อ่านชีต ' +
