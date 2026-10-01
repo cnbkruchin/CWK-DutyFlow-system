@@ -82,6 +82,8 @@ function ติดตั้งระบบ() {
   DB_invalidateAll();
   SETUP_seedConfig_();
 
+  AUTH_secret_();   // กุญแจลงลายมือชื่อเซสชัน (สร้างครั้งเดียว)
+
   // ข้อมูลครูจากระบบเดิม (เข้าด้วยอีเมล) ยังไม่มีชื่อผู้ใช้ — ตั้งให้อัตโนมัติ
   var named = SETUP_fillUsernames_();
   var admin = SETUP_ensureAdmin_();

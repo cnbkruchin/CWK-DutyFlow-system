@@ -163,6 +163,7 @@ var API_DURING_PW_CHANGE_ = { 'auth.changePassword': true };
 function API_login_(p) {
   var d = p || {};
   var ctx = AUTH_login(d.username, d.password);
+  if (!ctx.ok || !ctx.token) throw new Error(ctx.reason || 'เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่');
   return { token: ctx.token, boot: API_bootstrap_(ctx) };
 }
 
@@ -248,6 +249,8 @@ function api(action, payload, token) {
     return {
       ok: true,
       data: data === undefined ? null : data,
+      // token ใหม่เมื่อต่ออายุหรือเปลี่ยนรหัสผ่าน — หน้าเว็บสลับไปใช้เอง
+      _token: (ctx.ok && ctx.renewedToken && act !== 'auth.logout') ? ctx.renewedToken : undefined,
       _perf: {
         ms: new Date().getTime() - started,
         sheetReads: DB_STATS.sheetReads,

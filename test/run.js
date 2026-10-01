@@ -493,7 +493,7 @@ section('21. กันการเรียกฟังก์ชันฝั่�
   ok('bootstrap แจ้งให้เข้าสู่ระบบ', b.ok && b.data.authorized === false && b.data.loginRequired === true);
   ok('bootstrap ก่อนเข้าสู่ระบบไม่มีข้อมูลผู้ใช้', !b.data.user && !b.data.menu);
   const bad = W.api('bootstrap', {}, 'f'.repeat(64));
-  eq('token ปลอมถือว่าหมดอายุ', bad.data.reasonCode, 'SESSION_EXPIRED');
+  eq('token รูปแบบผิดถูกปฏิเสธ', bad.data.reasonCode, 'SESSION_INVALID');
 })();
 (function () {
   const store = { _props: {}, _email: '', _effectiveEmail: 'owner@school.test' };
@@ -507,8 +507,9 @@ section('21. กันการเรียกฟังก์ชันฝั่�
 section('22. เข้าสู่ระบบด้วยชื่อผู้ใช้และรหัสผ่าน (ครบวงจร)');
 
 /** ระบบจำลองบนสเปรดชีตในหน่วยความจำ — ทุกคำขอโหลดโค้ดใหม่เหมือนการประมวลผลจริงของ Apps Script */
-function makeSystem(sheets) {
-  const store = { _props: { PHOTO_FOLDER_ID: 'p', REPORT_FOLDER_ID: 'r' }, _sheets: sheets || {}, _email: 'owner@school.test', _quiet: true };
+function makeSystem(sheets, extra) {
+  const store = Object.assign({ _props: { PHOTO_FOLDER_ID: 'p', REPORT_FOLDER_ID: 'r' }, _sheets: sheets || {},
+    _email: 'owner@school.test', _quiet: true }, extra || {});
   const fresh = () => loadAll(store);
   return {
     store, fresh,
@@ -548,8 +549,8 @@ function credsOf(msg) {
   r = api('auth.login', { username: ' ADMIN ', password: admin.password });
   ok('เข้าสู่ระบบสำเร็จ (ไม่สนตัวพิมพ์ใหญ่และช่องว่าง)', r.ok, r.error);
   if (!r.ok) return;
-  const tok = r.data.token;
-  ok('token สุ่มยาว 64 ตัว', /^[0-9a-f]{64}$/.test(tok));
+  let tok = r.data.token;
+  ok('token มีลายมือชื่อ HMAC', /^v1\.[A-Za-z0-9-]+\.\d+\.[0-9a-f]{64}$/.test(tok), tok);
   eq('ข้อมูลผู้ใช้หลังเข้าสู่ระบบ',
     [r.data.boot.authorized, r.data.boot.user.username, r.data.boot.user.role, r.data.boot.user.mustChangePassword],
     [true, 'admin', 'SYS_ADMIN', true]);
@@ -564,8 +565,11 @@ function credsOf(msg) {
   ok('รหัสผ่านใหม่ซ้ำรหัสเดิม', !r.ok && /ไม่ซ้ำกับรหัสผ่านเดิม/.test(r.error), r.error);
   r = api('auth.changePassword', { currentPassword: admin.password, newPassword: 'Admin#2569' }, tok);
   ok('เปลี่ยนรหัสผ่านสำเร็จ', r.ok, r.error);
+  ok('ได้ token ใหม่หลังเปลี่ยนรหัสผ่าน', !!r._token && r._token !== tok);
+  eq('token ก่อนเปลี่ยนรหัสผ่านใช้ไม่ได้แล้ว', api('teacher.list', {}, tok).code, 'AUTH_REQUIRED');
+  tok = r._token;
   r = api('teacher.list', {}, tok);
-  ok('เซสชันเดิมใช้ต่อได้หลังเปลี่ยนรหัสผ่าน', r.ok, r.error);
+  ok('เครื่องที่เปลี่ยนรหัสผ่านใช้งานต่อได้ด้วย token ใหม่', r.ok, r.error);
   ok('รายชื่อครูไม่ส่ง hash ออกไป', r.ok && JSON.stringify(r.data).indexOf('pbkdf2') < 0);
   ok('ใช้รหัสผ่านชั่วคราวเดิมไม่ได้แล้ว', !sys.login('admin', admin.password));
   const otherTok = sys.login('admin', 'Admin#2569');
@@ -597,6 +601,7 @@ function credsOf(msg) {
   ok('รหัสผ่านต้องไม่เหมือนชื่อผู้ใช้', !r.ok && /ไม่เหมือนชื่อผู้ใช้/.test(r.error), r.error);
   r = api('auth.changePassword', { currentPassword: somTemp, newPassword: 'Duty2569' }, tTok);
   ok('ครูตั้งรหัสผ่านใหม่', r.ok, r.error);
+  tTok = r._token;
   r = api('bootstrap', {}, tTok);
   eq('ครูเห็นเมนูตามบทบาทเดิม', r.data.menu.map(x => x.key), ['today', 'mine']);
   r = api('teacher.save', { firstName: 'x', lastName: 'y', username: 'hacker', role: 'SYS_ADMIN' }, tTok);
@@ -605,8 +610,8 @@ function credsOf(msg) {
   ok('ครูรีเซ็ตรหัสผ่านคนอื่นไม่ได้', !r.ok && /สิทธิ์ไม่เพียงพอ/.test(r.error), r.error);
 
   // หัวหน้าเวรยังได้สิทธิ์ระดับเดิม
-  const hTok = sys.login('somying', 'Somying#1');
-  api('auth.changePassword', { currentPassword: 'Somying#1', newPassword: 'Head#2569' }, hTok);
+  const hTok = api('auth.changePassword', { currentPassword: 'Somying#1', newPassword: 'Head#2569' },
+    sys.login('somying', 'Somying#1'))._token;
   r = api('bootstrap', {}, hTok);
   ok('หัวหน้าเวรเห็นเมนูจัดเวรและอนุมัติ', r.ok && ['assign', 'approve', 'report'].every(k => r.data.menu.some(m => m.key === k)));
   ok('หัวหน้าเวรไม่เห็นเมนูตั้งค่า', r.ok && !r.data.menu.some(m => m.key === 'settings'));
@@ -616,7 +621,7 @@ function credsOf(msg) {
   ok('ผู้ดูแลรีเซ็ตรหัสผ่านครู', r.ok && !!r.data.tempPassword, r.error);
   const somTemp2 = r.data.tempPassword;
   r = api('bootstrap', {}, tTok);
-  eq('เซสชันเดิมของครูหมดอายุหลังรีเซ็ต', r.data.reasonCode, 'PASSWORD_CHANGED');
+  eq('เซสชันเดิมของครูหมดอายุหลังรีเซ็ต', r.data.reasonCode, 'SESSION_INVALID');
   r = api('schedule.mine', {}, tTok);
   eq('คำสั่งอื่นก็ถูกปฏิเสธ', r.code, 'AUTH_REQUIRED');
   r = api('teacher.resetPassword', { id: adminRow.id }, tok);
@@ -662,8 +667,8 @@ section('23. นำเข้าครูพร้อมชื่อผู้ใ�
 (function () {
   const sys = makeSystem();
   const admin = credsOf(sys.fresh()['ติดตั้งระบบ']());
-  const t0 = sys.login(admin.username, admin.password);
-  sys.api('auth.changePassword', { currentPassword: admin.password, newPassword: 'Admin#2569' }, t0);
+  const t0 = sys.api('auth.changePassword', { currentPassword: admin.password, newPassword: 'Admin#2569' },
+    sys.login(admin.username, admin.password))._token;
 
   const csv = 'รหัส,ชื่อ,นามสกุล,ชื่อผู้ใช้,รหัสผ่าน,กลุ่มสาระ,อีเมล\n' +
     'T001,สมชาย,ใจดี,somchai,Somchai#1,วิทย์,\n' +
@@ -693,6 +698,56 @@ section('23. นำเข้าครูพร้อมชื่อผู้ใ�
   ok('อัปเดตแล้วรหัสผ่านเดิมยังใช้ได้', !!sys.login('somying', sy.tempPassword) && r.data.accounts.length === 0);
 })();
 
+/* ================= 25. token และแคช ================= */
+section('25. token ที่ลงลายมือชื่อ ไม่พึ่ง CacheService');
+(function () {
+  // แคชของ Apps Script ลบข้อมูลได้ทุกเมื่อ — จำลองแคชที่ไม่เก็บอะไรเลย
+  const sys = makeSystem({}, { _brokenCache: true });
+  const admin = credsOf(sys.fresh()['ติดตั้งระบบ']());
+  let r = sys.api('auth.login', { username: admin.username, password: admin.password });
+  ok('เข้าสู่ระบบได้แม้แคชใช้ไม่ได้', r.ok && r.data.boot.authorized === true && !!r.data.boot.user, r.error || JSON.stringify(r.data && r.data.boot));
+  ok('ส่งข้อมูลผู้ใช้กลับพร้อม token', r.ok && r.data.boot.user.username === 'admin' && r.data.boot.user.mustChangePassword === true);
+  let tok = r.data.token;
+  r = sys.api('auth.changePassword', { currentPassword: admin.password, newPassword: 'Admin#2569' }, tok);
+  ok('ตั้งรหัสผ่านใหม่ได้แม้แคชใช้ไม่ได้', r.ok && !!r._token, r.error);
+  tok = r._token;
+  r = sys.api('teacher.list', {}, tok);
+  ok('คำขอถัดไปยังเข้าสู่ระบบอยู่แม้แคชใช้ไม่ได้', r.ok, r.error);
+})();
+(function () {
+  const sys = makeSystem();
+  const admin = credsOf(sys.fresh()['ติดตั้งระบบ']());
+  const first = sys.login(admin.username, admin.password);
+  const tok = sys.api('auth.changePassword', { currentPassword: admin.password, newPassword: 'Admin#2569' }, first)._token;
+  sys.api('teacher.save', { firstName: 'สมชาย', lastName: 'ใจดี', username: 'somchai', password: 'Somchai#1' }, tok);
+  const somId = sys.rows('TEACHERS').find(t => t.username === 'somchai').id;
+  const adminId = tok.split('.')[1];
+
+  // ปลอม token: เปลี่ยนรหัสครูในโทเค็นเป็นของคนอื่น แต่ใช้ลายมือชื่อเดิม
+  const forged = tok.replace(adminId, somId);
+  eq('แก้ teacherId ใน token ไม่ได้', sys.api('bootstrap', {}, forged).data.reasonCode, 'SESSION_INVALID');
+  eq('แก้ลายมือชื่อไม่ได้', sys.api('bootstrap', {}, tok.slice(0, -1) + (tok.slice(-1) === 'a' ? 'b' : 'a')).data.reasonCode, 'SESSION_INVALID');
+
+  // token ที่เซิร์ฟเวอร์ออกเองแต่อายุต่างกัน
+  const S = sys.fresh(); S.EXEC_trust_();
+  const signed = (id, ageMs) => {
+    const body = 'v1.' + id + '.' + (Date.now() - ageMs);
+    const t = S.dbGetById('TEACHERS', id);
+    return body + '.' + S.AUTH_sign_(body + '.' + S.AUTH_pwFingerprint_(t));
+  };
+  eq('token เกินอายุ (ค่าเริ่มต้น 360 นาที) หมดอายุ', sys.api('bootstrap', {}, signed(adminId, 361 * 60000)).data.reasonCode, 'SESSION_EXPIRED');
+  let r = sys.api('teacher.list', {}, signed(adminId, 2 * 60000));
+  ok('token ใหม่ไม่ต้องต่ออายุ', r.ok && !r._token, r.error);
+  r = sys.api('teacher.list', {}, signed(adminId, 30 * 60000));
+  ok('ใช้งานต่อเนื่องได้ token ต่ออายุ', r.ok && !!r._token, r.error);
+  ok('token ที่ต่ออายุใช้งานได้', sys.api('teacher.list', {}, r._token).ok);
+
+  // ลบกุญแจลับ = ทุกคนออกจากระบบ
+  delete sys.store._props.SESSION_SECRET;
+  eq('เปลี่ยนกุญแจลับแล้ว token เดิมใช้ไม่ได้', sys.api('bootstrap', {}, tok).data.reasonCode, 'SESSION_INVALID');
+  ok('สร้างกุญแจใหม่และเข้าสู่ระบบใหม่ได้', !!sys.login('admin', 'Admin#2569') && !!sys.store._props.SESSION_SECRET);
+})();
+
 /* ================= 24. ย้ายจากระบบเดิม ================= */
 section('24. ย้ายข้อมูลจากระบบเดิมที่เข้าด้วยอีเมล');
 (function () {
@@ -717,9 +772,9 @@ section('24. ย้ายข้อมูลจากระบบเดิมท�
     [['director@school.ac.th', 'SYS_ADMIN'], ['somchai@school.ac.th', 'DAILY_HEAD'], ['', 'TEACHER']]);
   eq('ไม่มีการสร้างครูเพิ่ม', rows.length, 3);
 
-  const tok = sys.login('director', admin.password);
-  ok('ผู้ดูแลระบบเดิมเข้าสู่ระบบได้', !!tok);
-  sys.api('auth.changePassword', { currentPassword: admin.password, newPassword: 'Director#1' }, tok);
+  const first = sys.login('director', admin.password);
+  ok('ผู้ดูแลระบบเดิมเข้าสู่ระบบได้', !!first);
+  const tok = sys.api('auth.changePassword', { currentPassword: admin.password, newPassword: 'Director#1' }, first)._token;
   let r = sys.api('teacher.issuePasswords', {}, tok);
   ok('ออกรหัสผ่านชั่วคราวให้ครูที่ยังไม่มี', r.ok && r.data.count === 2, r.error || JSON.stringify(r.data));
   const som = r.ok && r.data.accounts.find(a => a.username === 'somchai');

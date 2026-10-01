@@ -5,9 +5,9 @@
  *
  * ลำดับการทำงาน
  *  1) หน้าเว็บส่งชื่อผู้ใช้และรหัสผ่านไปที่ auth.login
- *  2) เซิร์ฟเวอร์ตรวจรหัสผ่าน (PBKDF2-SHA256 + salt) แล้วออก token สุ่ม เก็บใน CacheService
+ *  2) เซิร์ฟเวอร์ตรวจรหัสผ่าน (PBKDF2-SHA256 + salt) แล้วออก token ที่ลงลายมือชื่อด้วย HMAC
  *  3) หน้าเว็บเก็บ token ไว้ในหน่วยความจำเท่านั้น และส่งมากับทุกคำขอ api(action, payload, token)
- *  4) ทุกคำขออ่านข้อมูลครูใหม่จาก token — บทบาทหรือสถานะที่เปลี่ยนมีผลทันที
+ *  4) ทุกคำขอตรวจลายมือชื่อ แล้วอ่านข้อมูลครูใหม่ — บทบาทหรือสถานะที่เปลี่ยนมีผลทันที
  */
 
 var ROLES = {
@@ -129,10 +129,17 @@ function AUTH_hexToBytes_(hex) {
 function AUTH_randomBytes_(n) {
   var out = [];
   while (out.length < n) {
-    out = out.concat(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,
-      Utilities.getUuid() + Utilities.getUuid() + new Date().getTime()));
+    var d = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,
+      Utilities.getUuid() + Utilities.getUuid() + new Date().getTime());
+    // คัดลอกทีละไบต์ ใช้ได้ทั้งกับ array จริงและ array-like ที่ Apps Script ส่งกลับมา
+    for (var i = 0; i < d.length && out.length < n; i++) out.push(Number(d[i]));
   }
-  return out.slice(0, n);
+  var distinct = {};
+  out.forEach(function (b) { distinct[b] = true; });
+  if (out.some(isNaN) || (n >= 16 && Object.keys(distinct).length < 4)) {
+    throw new Error('สร้างค่าสุ่มไม่สำเร็จ กรุณาลองใหม่');
+  }
+  return out;
 }
 
 function AUTH_randomHex_(n) { return AUTH_bytesToHex_(AUTH_randomBytes_(n)); }
@@ -246,39 +253,60 @@ function AUTH_findByUsername_(username) {
 /* เซสชัน                                                             */
 /* ================================================================= */
 
-var AUTH_TOKEN_RE = /^[0-9a-f]{64}$/;
+/*
+ * token = v1.<teacherId>.<ออกเมื่อ ms>.<ลายมือชื่อ>
+ * ลายมือชื่อ = HMAC-SHA256(SESSION_SECRET, "v1.<teacherId>.<ออกเมื่อ>.<ลายนิ้วมือรหัสผ่าน>")
+ *
+ * ตรวจได้ทุกคำขอโดยไม่ต้องพึ่ง CacheService (แคชของ Apps Script ลบข้อมูลก่อนเวลาได้)
+ * เปลี่ยน/รีเซ็ตรหัสผ่าน → ลายนิ้วมือเปลี่ยน → token เดิมทุกเครื่องใช้ไม่ได้ทันที
+ * ใช้งานต่อเนื่องได้ token ใหม่กลับไปใน _token (หน้าเว็บสลับให้เอง) จึงหมดอายุเมื่อไม่ได้ใช้งานเท่านั้น
+ * ลบ SESSION_SECRET ใน Script Properties = ให้ทุกคนออกจากระบบทันที
+ */
+var AUTH_TOKEN_RE = /^v1\.([A-Za-z0-9-]{1,64})\.(\d{10,16})\.([0-9a-f]{64})$/;
+var AUTH_RENEW_AFTER_MS = 5 * 60 * 1000;
 
-function AUTH_sessionKey_(token) { return 'sess:' + token; }
-
-/** อายุเซสชัน (วินาที) — CacheService เก็บได้นานสุด 6 ชั่วโมง */
+/** อายุ token (วินาที) */
 function AUTH_sessionTtl_() {
   var min = CFG_num('session_timeout_min') || 360;
-  return Math.max(900, Math.min(21600, Math.round(min * 60)));
+  return Math.max(15, Math.min(1440, Math.round(min))) * 60;
 }
 
-function AUTH_sessionGet_(token) {
-  try {
-    var raw = CacheService.getScriptCache().get(AUTH_sessionKey_(token));
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) {
-    return null;
-  }
+/** กุญแจลับสำหรับลงลายมือชื่อ token — สร้างครั้งแรกที่ใช้ เก็บใน Script Properties */
+function AUTH_secret_() {
+  var secret = PROP_get('SESSION_SECRET');
+  if (secret) return secret;
+  return withLock(function () {
+    var again = PROP_get('SESSION_SECRET');
+    if (again) return again;
+    var created = AUTH_randomHex_(32);
+    PROP_set('SESSION_SECRET', created);
+    return created;
+  }, 10000);
 }
 
-function AUTH_sessionPut_(token, sess) {
-  CacheService.getScriptCache().put(AUTH_sessionKey_(token), JSON.stringify(sess), AUTH_sessionTtl_());
+function AUTH_sign_(text) {
+  return AUTH_bytesToHex_(Utilities.computeHmacSha256Signature(text, AUTH_secret_()));
 }
 
-/** ต่ออายุแบบเลื่อนตามการใช้งาน แต่เขียนแคชไม่เกินนาทีละครั้ง */
-function AUTH_sessionTouch_(token, sess) {
-  var now = new Date().getTime();
-  if (now - num(sess.at, 0) < 60000) return;
-  sess.at = now;
-  try { AUTH_sessionPut_(token, sess); } catch (e) { /* ไม่ต้องทำอะไร */ }
+function AUTH_issueToken_(teacher) {
+  var body = 'v1.' + teacher.id + '.' + new Date().getTime();
+  return body + '.' + AUTH_sign_(body + '.' + AUTH_pwFingerprint_(teacher));
 }
 
-function AUTH_sessionRemove_(token) {
-  try { CacheService.getScriptCache().remove(AUTH_sessionKey_(token)); } catch (e) { /* ignore */ }
+/** แยกส่วนของ token (ยังไม่ตรวจลายมือชื่อ) คืน null ถ้ารูปแบบไม่ถูกต้อง */
+function AUTH_parseToken_(token) {
+  var m = AUTH_TOKEN_RE.exec(str(token));
+  return m ? { tid: m[1], iat: Number(m[2]), sig: m[3] } : null;
+}
+
+/* ออกจากระบบ: จดลายมือชื่อที่ยกเลิกไว้ในแคช (ทำได้ดีที่สุดเท่าที่แคชเก็บไว้)
+   token อยู่ในหน่วยความจำของหน้าเว็บเท่านั้น และหน้าเว็บทิ้ง token ทันทีที่กดออกจากระบบ */
+function AUTH_revoke_(sig) {
+  try { CacheService.getScriptCache().put('rv:' + sig, '1', Math.min(21600, AUTH_sessionTtl_())); } catch (e) { }
+}
+
+function AUTH_isRevoked_(sig) {
+  try { return !!CacheService.getScriptCache().get('rv:' + sig); } catch (e) { return false; }
 }
 
 /** ลายนิ้วมือของรหัสผ่าน — เปลี่ยนรหัสผ่านแล้วเซสชันเดิมทุกเครื่องหมดอายุทันที */
@@ -324,47 +352,13 @@ function AUTH_fail_(ctx, reason, code) {
   return ctx;
 }
 
-/**
- * บริบทผู้ใช้จาก token — เรียกได้หลายครั้ง คำนวณจริงครั้งเดียว
- * คืนค่าเสมอ (ไม่ throw) เพื่อให้หน้าเว็บแสดงสาเหตุได้
- */
-function AUTH_context(token) {
-  if (AUTH_MEM) return AUTH_MEM;
-  var ctx = AUTH_blankCtx_();
-
-  var t = str(token).toLowerCase();
-  if (!t) return AUTH_fail_(ctx, 'กรุณาเข้าสู่ระบบ', 'NO_SESSION');
-
-  var sess = AUTH_TOKEN_RE.test(t) ? AUTH_sessionGet_(t) : null;
-  if (!sess || !sess.tid) {
-    return AUTH_fail_(ctx, 'หมดเวลาการใช้งานหรือยังไม่ได้เข้าสู่ระบบ กรุณาเข้าสู่ระบบใหม่', 'SESSION_EXPIRED');
-  }
-
-  var teacher;
-  try {
-    teacher = dbGetById('TEACHERS', sess.tid);
-  } catch (e) {
-    return AUTH_fail_(ctx, 'อ่านข้อมูลผู้ใช้ไม่สำเร็จ: ' + ((e && e.message) || 'ไม่ทราบสาเหตุ'), 'AUTH_ERROR');
-  }
-
-  if (!teacher) {
-    AUTH_sessionRemove_(t);
-    return AUTH_fail_(ctx, 'ไม่พบบัญชีผู้ใช้นี้แล้ว กรุณาติดต่อผู้ดูแลระบบ', 'NOT_FOUND');
-  }
-  if (str(teacher.status) !== 'ACTIVE') {
-    AUTH_sessionRemove_(t);
-    return AUTH_fail_(ctx, 'บัญชี ' + str(teacher.username) + ' ถูกระงับการใช้งาน กรุณาติดต่อผู้ดูแลระบบ', 'INACTIVE');
-  }
-  if (!AUTH_safeEqual_(AUTH_pwFingerprint_(teacher), str(sess.fp))) {
-    AUTH_sessionRemove_(t);
-    return AUTH_fail_(ctx, 'รหัสผ่านของบัญชีนี้ถูกเปลี่ยนแล้ว กรุณาเข้าสู่ระบบใหม่', 'PASSWORD_CHANGED');
-  }
-
+/** เติมข้อมูลผู้ใช้ลง ctx จากแถวครูที่ยืนยันแล้ว */
+function AUTH_fillCtx_(ctx, teacher, token) {
   var role = str(teacher.role) || 'TEACHER';
   if (!ROLES[role]) role = 'TEACHER';
 
   ctx.ok = true;
-  ctx.token = t;
+  ctx.token = token;
   ctx.teacherId = teacher.id;
   ctx.username = str(teacher.username);
   ctx.email = str(teacher.email).toLowerCase();
@@ -375,9 +369,55 @@ function AUTH_context(token) {
   ctx.roleName = ROLES[role].name;
   ctx.level = ROLES[role].level;
   ctx.mustChangePassword = bool(teacher.must_change_password);
-
-  AUTH_sessionTouch_(t, sess);
   AUTH_MEM = ctx;
+  return ctx;
+}
+
+/**
+ * บริบทผู้ใช้จาก token — เรียกได้หลายครั้ง คำนวณจริงครั้งเดียว
+ * คืนค่าเสมอ (ไม่ throw) เพื่อให้หน้าเว็บแสดงสาเหตุได้
+ */
+function AUTH_context(token) {
+  if (AUTH_MEM) return AUTH_MEM;
+  var ctx = AUTH_blankCtx_();
+
+  var t = str(token);
+  if (!t) return AUTH_fail_(ctx, 'กรุณาเข้าสู่ระบบ', 'NO_SESSION');
+
+  var tok = AUTH_parseToken_(t);
+  if (!tok) {
+    return AUTH_fail_(ctx, 'เซสชันไม่ถูกต้อง กรุณาเข้าสู่ระบบใหม่', 'SESSION_INVALID');
+  }
+
+  var now = new Date().getTime();
+  if (tok.iat > now + 60000 || now - tok.iat > AUTH_sessionTtl_() * 1000) {
+    return AUTH_fail_(ctx, 'หมดเวลาการใช้งาน กรุณาเข้าสู่ระบบใหม่', 'SESSION_EXPIRED');
+  }
+
+  var teacher, expected;
+  try {
+    teacher = dbGetById('TEACHERS', tok.tid);
+    expected = teacher ? AUTH_sign_('v1.' + tok.tid + '.' + tok.iat + '.' + AUTH_pwFingerprint_(teacher)) : '';
+  } catch (e) {
+    return AUTH_fail_(ctx, 'อ่านข้อมูลผู้ใช้ไม่สำเร็จ: ' + ((e && e.message) || 'ไม่ทราบสาเหตุ'), 'AUTH_ERROR');
+  }
+
+  if (!teacher) {
+    return AUTH_fail_(ctx, 'ไม่พบบัญชีผู้ใช้นี้แล้ว กรุณาติดต่อผู้ดูแลระบบ', 'NOT_FOUND');
+  }
+  if (!AUTH_safeEqual_(expected, tok.sig)) {
+    return AUTH_fail_(ctx, 'เซสชันนี้ใช้ไม่ได้แล้ว (อาจมีการเปลี่ยนหรือรีเซ็ตรหัสผ่าน) กรุณาเข้าสู่ระบบใหม่',
+      'SESSION_INVALID');
+  }
+  if (AUTH_isRevoked_(tok.sig)) {
+    return AUTH_fail_(ctx, 'ออกจากระบบแล้ว กรุณาเข้าสู่ระบบใหม่', 'SESSION_EXPIRED');
+  }
+  if (str(teacher.status) !== 'ACTIVE') {
+    return AUTH_fail_(ctx, 'บัญชี ' + str(teacher.username) + ' ถูกระงับการใช้งาน กรุณาติดต่อผู้ดูแลระบบ', 'INACTIVE');
+  }
+
+  AUTH_fillCtx_(ctx, teacher, t);
+  if (now - tok.iat > AUTH_RENEW_AFTER_MS) ctx.renewedToken = AUTH_issueToken_(teacher);
   return ctx;
 }
 
@@ -424,22 +464,20 @@ function AUTH_login(username, password) {
   }
 
   AUTH_failClear_(u);
-  var token = AUTH_randomHex_(32);
-  AUTH_sessionPut_(token, { tid: teacher.id, fp: AUTH_pwFingerprint_(teacher), at: new Date().getTime() });
-
-  AUTH_MEM = null;
-  var ctx = AUTH_context(token);
+  // สร้าง ctx จากบัญชีที่เพิ่งตรวจรหัสผ่านผ่านโดยตรง ไม่ต้องอ่าน token กลับจากที่เก็บใด ๆ
+  var ctx = AUTH_fillCtx_(AUTH_blankCtx_(), teacher, AUTH_issueToken_(teacher));
   AUDIT_log(ctx, 'LOGIN', 'TEACHERS', teacher.id, null, null);
   return ctx;
 }
 
 function AUTH_logout(ctx) {
-  if (ctx && ctx.token) AUTH_sessionRemove_(ctx.token);
+  var tok = ctx && ctx.token ? AUTH_parseToken_(ctx.token) : null;
+  if (tok) AUTH_revoke_(tok.sig);
   if (ctx && ctx.ok) AUDIT_log(ctx, 'LOGOUT', 'TEACHERS', ctx.teacherId, null, null);
   return { loggedOut: true };
 }
 
-/** ผู้ใช้เปลี่ยนรหัสผ่านของตนเอง — เซสชันปัจจุบันใช้ต่อได้ เซสชันบนเครื่องอื่นหมดอายุ */
+/** ผู้ใช้เปลี่ยนรหัสผ่านของตนเอง — เครื่องนี้ได้ token ใหม่ (ส่งกลับใน _token) เครื่องอื่นต้องเข้าใหม่ */
 function AUTH_changePassword(ctx, currentPassword, newPassword) {
   AUTH_require(ctx);
   if (!ctx.teacherId || !ctx.token) throw new Error('บัญชีนี้เปลี่ยนรหัสผ่านผ่านหน้าเว็บไม่ได้');
@@ -456,9 +494,7 @@ function AUTH_changePassword(ctx, currentPassword, newPassword) {
   var patch = AUTH_passwordPatch_(next, false);
   withLock(function () { dbUpdate('TEACHERS', t.id, patch); });
 
-  AUTH_sessionPut_(ctx.token, {
-    tid: t.id, fp: AUTH_pwFingerprint_(patch), at: new Date().getTime()
-  });
+  ctx.renewedToken = AUTH_issueToken_({ id: t.id, password_hash: patch.password_hash });
   ctx.mustChangePassword = false;
   AUDIT_log(ctx, 'PASSWORD_CHANGE', 'TEACHERS', t.id, null, null);
   return { changed: true };

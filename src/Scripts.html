@@ -25,6 +25,7 @@ var _cache = {};
 function call(action, payload) {
   return new Promise(function (resolve, reject) {
     var done = false;
+    var sentToken = App.token || '';
 
     var timer = setTimeout(function () {
       if (done) return;
@@ -44,6 +45,8 @@ function call(action, payload) {
       google.script.run
         .withSuccessHandler(function (res) {
           if (!res) return finish(reject, new Error('เซิร์ฟเวอร์ไม่ส่งข้อมูลกลับ (คำสั่ง: ' + action + ')'));
+          // เซิร์ฟเวอร์ต่ออายุ token ให้ — ใช้เฉพาะเมื่อยังเป็นเซสชันเดิม (ไม่ได้ออกจากระบบไประหว่างรอ)
+          if (res._token && sentToken && App.token === sentToken) App.token = res._token;
           if (res.ok) return finish(resolve, res.data);
           var e = new Error(res.error || 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ');
           e.code = res.code || 'ERROR';
@@ -57,7 +60,7 @@ function call(action, payload) {
           if (!msg) msg = 'ติดต่อเซิร์ฟเวอร์ไม่สำเร็จ (คำสั่ง: ' + action + ')';
           finish(reject, new Error(msg));
         })
-        .api(action, payload || {}, App.token || '');
+        .api(action, payload || {}, sentToken);
     } catch (err) {
       finish(reject, new Error('เรียกเซิร์ฟเวอร์ไม่สำเร็จ: ' +
         ((err && err.message) || 'ไม่ทราบสาเหตุ')));
@@ -447,6 +450,10 @@ function doLogin(e) {
 
   call('auth.login', { username: username, password: password })
     .then(function (res) {
+      var boot = res && res.boot;
+      if (!res || !res.token || !boot || !boot.authorized || !boot.user) {
+        throw new Error((boot && boot.reason) || 'เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง');
+      }
       App.token = res.token;
       clearCache();
       $('loginPass').value = '';

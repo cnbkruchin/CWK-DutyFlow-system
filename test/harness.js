@@ -60,6 +60,10 @@ function toJavaBytes(buf) {
 /* ---------- CacheService ในหน่วยความจำ ---------- */
 
 function makeCache(data) {
+  // _brokenCache: แคชที่ลบข้อมูลทันที (CacheService ของจริงไม่รับประกันว่าจะเก็บไว้)
+  if (data._brokenCache) {
+    return { get: () => null, getAll: () => ({}), put: () => {}, putAll: () => {}, remove: () => {}, removeAll: () => {} };
+  }
   data._cache = data._cache || {};
   const c = data._cache;
   return {

@@ -122,7 +122,11 @@ check('มีฟอร์มเข้าสู่ระบบ (ชื่อผ�
 check('ช่องรหัสผ่านเป็น type=password พร้อม autocomplete',
   /id="loginPass"[^>]*type="password"[^>]*autocomplete="current-password"/.test(src['Index.html'].replace(/\s+/g, ' ')));
 check('ส่ง token ไปกับทุกคำขอ',
-  /\.api\(action,\s*payload \|\| \{\},\s*App\.token/.test(src['Scripts.html']));
+  /sentToken\s*=\s*App\.token/.test(src['Scripts.html']) &&
+  /\.api\(action,\s*payload \|\| \{\},\s*sentToken\)/.test(src['Scripts.html']));
+check('รับ token ที่ต่ออายุจากเซิร์ฟเวอร์', /res\._token/.test(src['Scripts.html']));
+check('ตรวจผลเข้าสู่ระบบก่อนอ่านข้อมูลผู้ใช้', /!boot\.user/.test(src['Scripts.html']));
+check('ไม่มี SESSION_SECRET ในไฟล์หน้าเว็บ', !/SESSION_SECRET/.test(client));
 check('เข้าสู่ระบบผ่าน auth.login', used.has('auth.login'));
 check('มีปุ่มบัญชีของฉันและออกจากระบบ', used.has('auth.logout') && /id="accountBtn"/.test(src['Index.html']));
 check('ผู้ใช้เปลี่ยนรหัสผ่านเองได้', used.has('auth.changePassword'));
